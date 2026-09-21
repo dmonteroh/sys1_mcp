@@ -1,2 +1,5 @@
 .agent/indexes/
 .agent/rules/learned.md
+__pycache__/
+*.pyc
+.DS_Store
