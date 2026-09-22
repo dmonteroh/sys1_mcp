@@ -1,3 +1,9 @@
+> **Status: superseded.** Operator override, 2026-09-22 (`tasks/notes/T2a-fork-selection.md` §7) —
+> T2 no longer installs a third-party fork, so there is no fork CLI to confirm a flag on.
+> Replaced by [T3d](T3d-mcp-http-transport-first-party.md), which adds `streamable-http`
+> directly to the first-party server T2c builds. This file is retained for background only
+> and is not dispatchable.
+
 # T3b — Confirm the fork's HTTP transport flag and serve MCP over loopback
 
 ## Description

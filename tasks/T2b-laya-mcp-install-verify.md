@@ -1,3 +1,10 @@
+> **Status: superseded.** Operator override, 2026-09-22 (`tasks/notes/T2a-fork-selection.md` §7) —
+> after T2a selected `devthinker-ai/laya-mcp`, the operator decided to build a first-party
+> server instead, reusing design ideas from `wsargent/laya-mcp` (T2a's best architectural
+> match, disqualified there only on a missing license). Replaced by
+> [T2c](T2c-laya-mcp-first-party-server.md). This file is retained for background only and
+> is not dispatchable.
+
 # T2b — Install and verify the selected Laya MCP server over stdio
 
 ## Description
