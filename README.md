@@ -93,8 +93,28 @@ $ lsof -nP -iTCP:8765 -sTCP:LISTEN
 
 If the pid was not recorded, find it first with `lsof -nP -iTCP:8765 -sTCP:LISTEN` (the `PID` column), then `kill` that value and re-run the same `lsof` command to confirm it prints nothing.
 
+Note: a persistent instance may already be running as a `launchd` LaunchAgent — check
+`launchctl print gui/$(id -u)/com.ld-mcp.laya-mcp-http | grep -E 'state|pid'` before starting
+a second one. See `laya-mcp/deploy/com.ld-mcp.laya-mcp-http.plist` and
+`.agent/docs/dev-workflows.md`'s Bind address section for how that instance is configured and
+stopped (`launchctl bootout gui/$(id -u)/com.ld-mcp.laya-mcp-http`).
+
+## Resource cost
+
+Every figure below is one host's single-sample observation, not a benchmark
+(`tmp/tasks/notes/T5-resource-profile.md`):
+
+- ~38 MiB (39008 KiB) — idle `ps` RSS, persistent LaunchAgent, after a 67 s idle wait (`tmp/tasks/notes/T5-resource-profile.md` §3).
+- 0.1 — idle `ps` `%CPU` (lifetime average, not a short-interval sample) (`tmp/tasks/notes/T5-resource-profile.md` §3).
+- ~107 MiB (109920 KiB) — `ps` RSS immediately after one `laya_decide` call, a delta of +69.25 MiB over idle (`tmp/tasks/notes/T5-resource-profile.md` §4).
+- ~41 MiB (42192 KiB) — post-load idle re-sample RSS after another 67 s wait, only +3.11 MiB above the original idle figure (`tmp/tasks/notes/T5-resource-profile.md` §5).
+- `top -l 1`'s `MEM`/`rsize` reads far higher than `ps`'s `rss` at every sample (923M idle, 1002M after the call) — the two tools disagree by design, `ps`'s `%cpu` is a lifetime average while `top -l 1`'s is a short-interval sample (`tmp/tasks/notes/T5-resource-profile.md` §3, §6, §7).
+- `laya-mlx` runs on Metal via unified memory, so some model memory may sit outside the measured `rss`/`rsize` figures entirely — these are a lower bound, not a full accounting (`tmp/tasks/notes/T5-resource-profile.md` §7).
+- Full commands and verbatim `ps`/`top` output live in `tmp/tasks/notes/T5-resource-profile.md`.
+
 ## Pointers
 
 - `skills/laya-mcp/SKILL.md` — the agent-facing doc: tool contract, transport choice, worked call, latency, traps.
 - `.agent/docs/dev-workflows.md` — LAN IP, port, bind address, and firewall decisions.
+- `laya-mcp/deploy/com.ld-mcp.laya-mcp-http.plist` — the persistent LaunchAgent configuration.
 - `research.md` — the original research brief this setup was built from.
