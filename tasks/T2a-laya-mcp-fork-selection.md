@@ -2,7 +2,7 @@
 
 ## Description
 
-Decide which existing third-party Laya MCP server fork this project adopts, by opening the actual repositories rather than relying on research summaries. Research (research.md, section 2) names five forks — `wsargent/laya-mcp`, `andragon3110/laya-mcp`, `NVentimiglia/laya-mcp`, `PerryLink/laya-mcp`, `EbiPenMan/laya-mcp` — none marked official, and describes all five only from search-result summaries of their READMEs. This task replaces that with verified facts and one recorded decision. It installs nothing and runs nothing.
+Decide which existing third-party Laya MCP server fork this project adopts, by opening the actual repositories rather than relying on research summaries. Research (research.md, section 2) names five forks — `wsargent/laya-mcp`, `andragon3110/laya-mcp`, `NVentimiglia/laya-mcp`, `PerryLink/laya-mcp`, `EbiPenMan/laya-mcp` — none marked official, and describes all five only from search-result summaries of their READMEs. research.md's search predates this repo and may be incomplete, particularly for forks built specifically for Apple Silicon/macOS (the runtime T1 standardized on is itself a Mac-specific port, `laya-mlx`) — so this task also does a fresh search for additional candidates before applying the rubric, rather than treating the five named forks as the full field. This task replaces research.md's summaries with verified facts and one recorded decision. It installs nothing and runs nothing.
 
 Parent task: T2 (superseded by this task and T2b).
 
@@ -14,7 +14,8 @@ Parent task: T2 (superseded by this task and T2b).
 
 ## Acceptance Criteria
 
-- Open each of the five candidate repos directly (the repository itself, not a search-result summary) and record for each: archived state, license, date of the most recent commit, documented package name and entrypoints, and which Laya runtime it wraps.
+- Search GitHub (and PyPI, since fastmcp/laya-mcp forks are typically published there) for `laya-mcp` and near-synonyms (`laya mcp server`, `laya-mlx mcp`) beyond the five named candidates, with particular attention to any fork built specifically for Apple Silicon/macOS/`laya-mlx`/`laya-coreml`. Record what was searched and what turned up, even if nothing new qualifies — a documented empty result is a valid outcome, not a gap.
+- Open each candidate repo directly (the repository itself, not a search-result summary) — the five named in research.md plus any found by the search above — and record for each: archived state, license, date of the most recent commit, documented package name and entrypoints, and which Laya runtime it wraps.
 - Apply the five rubric criteria below and record pass/fail per criterion per fork as a table in the note.
 - Select one fork and state the reason in one sentence, or record that none qualify.
 - For the selected fork, record the exact install commands, the daemon entrypoint, and the MCP-server entrypoint as stated in its own README or source, each with the URL or file path it came from, plus the commit SHA T2b must pin to.
@@ -54,17 +55,18 @@ Tie-break among qualifying forks, in order: most recent commit, then closest mat
 **Playbook.**
 1. Read `tasks/notes/T1-setup.md` and note which runtime T1 standardized on.
 2. Read `research.md` section 2 and `.agent/docs/sources.md`.
-3. For each of the five forks, open the repo page, its README, its license file, and its commit list. Record the five rubric inputs plus the entrypoint names.
-4. For each fork, mark pass/fail per criterion.
-5. Apply the tie-break to the qualifying set, or take the no-qualifier branch above.
-6. For the winner, pull the exact install commands, entrypoints, latest commit SHA, and any existing transport flag from its own README or source.
-7. Write `tasks/notes/T2a-fork-selection.md`: the rubric table, the decision with its one-sentence reason, the verified install/entrypoint facts with sources, the pinned SHA, and the transport-flag finding.
-8. Update the `laya-mcp` rows in `.agent/docs/sources.md` to `verified` for every repo opened.
+3. Search GitHub and PyPI for `laya-mcp` and near-synonyms, specifically looking for any Mac/Apple-Silicon-specific fork beyond the five named. Record the search terms used and every additional candidate found (or that none were found).
+4. For each candidate (the five named plus any found in step 3), open the repo page, its README, its license file, and its commit list. Record the five rubric inputs plus the entrypoint names.
+5. For each fork, mark pass/fail per criterion.
+6. Apply the tie-break to the qualifying set, or take the no-qualifier branch above.
+7. For the winner, pull the exact install commands, entrypoints, latest commit SHA, and any existing transport flag from its own README or source.
+8. Write `tasks/notes/T2a-fork-selection.md`: the search record, the rubric table, the decision with its one-sentence reason, the verified install/entrypoint facts with sources, the pinned SHA, and the transport-flag finding.
+9. Update the `laya-mcp` rows in `.agent/docs/sources.md` to `verified` for every repo opened.
 
 ## Sizing Budget
 
 - Concern axes: 1 — external-source investigation and a recorded decision. within-target.
-- Acceptance criteria: 8. within-target.
+- Acceptance criteria: 9 (added a fresh-search step per operator direction, 2026-09-22: research.md's fork list predates this repo and may miss Mac-specific forks). within-target.
 - Estimated file touch count: 2 — `tasks/notes/T2a-fork-selection.md`, `.agent/docs/sources.md`. within-target.
 - Independent failure classes: 1 — candidate repos unreachable or too sparse to judge. "None qualify" is a defined completion, not a failure. within-target.
 - Read scope: 4 local files, largest `research.md` at 53 lines. within-target. Non-file addendum: five external GitHub repos are read; the rubric bounds what must be extracted from each.
@@ -79,6 +81,7 @@ Tie-break among qualifying forks, in order: most recent commit, then closest mat
 - Verification commands:
   - `["test", "-f", "tasks/notes/T2a-fork-selection.md"]`
   - `["bash", "-c", "for f in wsargent andragon3110 NVentimiglia PerryLink EbiPenMan; do grep -q \"$f\" tasks/notes/T2a-fork-selection.md || { echo \"missing $f\"; exit 1; }; done"]`
+  - Manual: the note records a fresh-search step (terms used, any additional candidates found or an explicit "none found"), not just the five originally-named forks.
   - `["grep", "-Eiq", "selected|none qualify", "tasks/notes/T2a-fork-selection.md"]`
   - `["bash", "-c", "git diff --name-only -- .agent/docs/sources.md | grep -q sources.md"]`
   - Manual: the note states a commit SHA for the selected fork, and the install command and both entrypoints each cite the URL or file path they came from.
