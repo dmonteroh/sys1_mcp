@@ -112,6 +112,38 @@ Every figure below is one host's single-sample observation, not a benchmark
 - `laya-mlx` runs on Metal via unified memory, so some model memory may sit outside the measured `rss`/`rsize` figures entirely — these are a lower bound, not a full accounting (`tmp/tasks/notes/T5-resource-profile.md` §7).
 - Full commands and verbatim `ps`/`top` output live in `tmp/tasks/notes/T5-resource-profile.md`.
 
+## Registering with an MCP client
+
+The server exposes a single MCP endpoint over `streamable-http` at `/mcp` (suggested name `laya-mcp`, URL shape `http://<LAN-IP or 127.0.0.1>:8765/mcp`), with no auth of any kind implemented.
+Read the current LAN IP live before filling in either block below — see `.agent/docs/dev-workflows.md` for the `ipconfig getifaddr en0` command and the accepted-unauthenticated-exposure decision; do not hardcode an IP here or anywhere else.
+
+### Claude Code
+
+Project-scoped MCP servers go in a `.mcp.json` file (or via `claude mcp add --transport http laya-mcp <url>`):
+
+```json
+{
+  "mcpServers": {
+    "laya-mcp": {
+      "type": "http",
+      "url": "http://<LAN-IP>:8765/mcp"
+    }
+  }
+}
+```
+
+### Codex CLI
+
+Codex reads `~/.codex/config.toml`, under an `[mcp_servers.<name>]` table with a `url` key for `streamable_http` servers:
+
+```toml
+[mcp_servers.laya-mcp]
+url = "http://<LAN-IP>:8765/mcp"
+```
+
+Neither block above needs a bearer token or auth header — this server has no auth, so there is nothing to configure for either client.
+These are the documented config shapes for each client; registering a live third client against this server end-to-end is out of scope here.
+
 ## Pointers
 
 - `skills/laya-mcp/SKILL.md` — the agent-facing doc: tool contract, transport choice, worked call, latency, traps.
