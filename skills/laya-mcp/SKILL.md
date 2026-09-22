@@ -186,4 +186,4 @@ Every figure below is one host's single-run observation, not a benchmark
 
 ## Provenance
 
-This file follows the in-repo `.agent/skills/` convention (`.agent/skills/daemon-lifecycle/SKILL.md`); no third-party skill file was consulted.
+This file follows the structural convention of `.agent/skills/daemon-lifecycle/SKILL.md`, but lives at `skills/laya-mcp/` in the repo root — maintained alongside the `laya-mcp/` server code, not as general `.agent/` domain knowledge — and is discoverable via a symlink at `.agent/skills/laya-mcp`. No third-party skill file was consulted.
