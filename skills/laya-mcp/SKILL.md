@@ -1,189 +1,107 @@
 ---
 name: laya-mcp
-description: "Calls this project's first-party Laya MCP server, the `laya_decide` tool, over either the stdio transport or the loopback `streamable-http` daemon. Use when an agent working in this repo needs a real `choice`/`score`/`noul` decision from the Laya runtime, needs to pick a transport, or hits one of this setup's known traps."
+description: "Calls the local Laya System One model over MCP for a fast, typed, calibrated decision about a piece of text — a label from a fixed set, a level on a fixed ladder, or a yes/no probability — instead of spending an LLM judgment call on it. Use when a classification, routing, or scoring decision needs a probability distribution to act on and the same closed question runs often."
 metadata:
-  category: workflow
+  category: ai
 ---
 
 # Laya decisions over MCP
 
-## When to use it
+System One models are a class built to make fast, structured decisions that software can use directly: give one a state and a typed question, and it returns a typed answer and a probability, not prose (TypeSafe AI, "System One" docs, docs.typesafe.ai/concepts/system-one). Laya, from Convai Innovations, is an open-weight entry in that class: a non-autoregressive classifier that runs a single forward pass in tens of milliseconds and generates no text at all (laya.convaiinnovations.com; huggingface.co/convaiinnovations/laya). Three checkpoints ship — a 421M ModernBERT-large English root, a 322M mmBERT-base multilingual variant, and `laya-typed-decisions`, 421M and tuned for agent traces, customer service, invoices and security incidents — and they answer the same questions differently. This skill covers using the `laya_decide` MCP tool an MCP server exposes over Laya, once that tool is already available: `laya_decide(state: str, questions: dict, checkpoint: str | None) -> dict`. There is no other tool and no preset shape — every use of Laya is one `laya_decide` call with a particular `questions` schema.
 
-- An agent in this repo needs one typed decision (`choice`, `score`, or `noul`) from the Laya
-  runtime and wants it through MCP rather than importing `laya_mlx` directly
-  (`laya-mcp/src/laya_mcp/server.py`).
-- Use the stdio transport for a single one-off call from a fresh process.
-- Use the `streamable-http` daemon for more than one call in a session, since the daemon
-  stays warm between calls (see Latency expectations below).
+Reach for it instead of a second LLM call whose only job is to pick a label, grade a level, or answer yes/no about text already in hand.
 
-## When not to use it
+## Use this skill when
 
-- Do not use this for any question outside `choice`/`score`/`noul` typed decisions — there is
-  exactly one tool, and it does not do free-form generation (`laya-mcp/src/laya_mcp/server.py`).
-- Do not reach for a preset tool name (`laya_triage`, `route_task`, etc.) — none exist in this
-  project; every one of those shapes is expressed as a `laya_decide` call with a specific
-  `questions` schema instead (`tmp/tasks/notes/T2c-design.md` §2).
+- The answers can be enumerated before asking: routing to one of a few queues, grading severity on a fixed ladder, testing one yes/no claim.
+- A number is needed to act on, not an opinion: the probability distribution lets you route above a threshold, escalate below one, or abstain when two options sit close together.
+- The question is about a specific piece of text in hand, not about the agent's own reasoning or the wider conversation.
+- The same shape of question runs often enough that a warm, sub-second, token-free call beats paying for an LLM's judgment every time.
 
-## Tool contract
+## Do not use this skill when
 
-- One tool: `laya_decide(state: str, questions: dict[str, Any]) -> dict[str, Any]`
-  (`laya-mcp/src/laya_mcp/server.py`).
-- `state` is the free-text input to reason about.
-- `questions` maps a field name to a question spec.
-- Each spec's `type` is one of `choice`, `score`, or `noul`.
-- Every spec carries `instructions`.
-- A `choice` spec additionally carries `criteria` (a list of allowed choices).
-- `laya_decide` is a thin rename of `laya-mlx`'s own `agent.predict(text, schema_dict)` API —
-  `state` is `text`, `questions` is `schema_dict` (`laya-mcp/src/laya_mcp/server.py`,
-  `tmp/tasks/notes/T1-setup.md` §3).
-- There is no `laya.choice(prompt, options)` API — that shape does not exist on the runtime
-  (`tmp/tasks/notes/T1-setup.md` §3).
+- The answer needs generated words: a summary, an explanation, extracted fields, a rewrite. Laya emits no text; `output_tokens` is `0` on every call.
+- The options can't be listed in advance. There is no open-ended mode and no invented label.
+- Being wrong is expensive and nobody reviews the answer, especially at high option cardinality (see Common pitfalls) — treat a flat or suspiciously spiky distribution as "ask instead of act," not as a resolved question.
+- Only one decision will ever be made, and a person or the calling agent can just make the call directly. A cold-loaded call carries real setup overhead (opening a connection, warming the model) that a single one-off judgment doesn't need to pay.
+- The input is long free text with no natural closed question inside it — reshape the ask into a stated criteria list first, or don't use Laya for that record.
+- The task is deciding whether a model belongs in a text-extraction pipeline at all, or building the deterministic-parser-plus-escalation seam around one — that is a distinct, larger design problem (`deterministic-extraction-gate`).
+- The `laya_decide` MCP tool isn't reachable yet, or needs installing, starting, or debugging. This skill assumes the tool is already available and covers using it well — standing up or operating the server behind it is an environment/ops concern outside its scope.
 
-## Choosing a transport
+## The tool contract
 
-Both console scripts are installed editable into one venv
-(`laya-mcp/pyproject.toml`, `tmp/tasks/notes/T2c-design.md` §1):
+`state` is the text to judge, in plain natural language. `questions` maps a field name you choose to one question spec; every spec carries `type` and `instructions`, written as the question itself in a short phrase. Put every question a decision needs into one call — they run as one batch, so three questions cost far less than three separate calls. `checkpoint` is optional and names which weights answer. See **Choosing a checkpoint**.
 
-- Distribution name: `ld-laya-mcp`. Import package: `laya_mcp`.
-- Install command: `uv pip install --python /Users/USERNAME/.venvs/laya-mlx-t1 -e ./laya-mcp`
-  (`tmp/tasks/notes/T2-setup.md` §8).
+| `type` | `criteria` | Answer fields |
+| --- | --- | --- |
+| `choice` | required — unique label strings, or a label-to-description map | `choice` (winning label), `probabilities` (label → probability) |
+| `score` | required — level labels, lowest first | `score` (expected level index, a fraction from `0` to `len(criteria) - 1`), `legend` (index → label), `probabilities` (index → probability) |
+| `noul` | optional — a `{false, true}` description pair | `noul` (probability the statement is true) |
 
-### stdio (one-off call, fresh process each time)
+A `choice` or `score` spec with no `criteria` is rejected before any model call runs.
 
-- Command: `/Users/USERNAME/.venvs/laya-mlx-t1/bin/laya-mcp`
-  (`laya-mcp/pyproject.toml`, `tmp/tasks/notes/T2-setup.md` §8).
-- Spawn it as a subprocess through an MCP stdio client; there is no flag to pass.
-- Every call pays a fresh process spawn plus a lazy `laya_mlx.load()` on first use
-  (`laya-mcp/src/laya_mcp/server.py` `_local_agent`).
+Alongside `answers`, a well-built server returns the facts a caller needs to trust the result: `checkpoint` (which weights answered), `limits` (that checkpoint's `max_len` and `head_max_len`), `route` and `route_reason`, and a `truncation` report. Read `checkpoint`, never `model` — `model` can report a constant such as `laya-rl-agent` across every checkpoint and does not identify the weights. Never hardcode a token budget: read `limits` from the response, because it changes with the checkpoint.
 
-### streamable-http (repeated calls, one warm daemon)
+## Choosing a checkpoint
 
-- Start command: `nohup /Users/USERNAME/.venvs/laya-mlx-t1/bin/laya-mcp-http > /tmp/laya-mcp-http.log 2>&1 &`
-  (`tmp/tasks/notes/T3-transport.md` §5).
-- Loads the agent eagerly, before the listener accepts connections
-  (`laya-mcp/src/laya_mcp/daemon.py`).
-- MCP endpoint: `http://127.0.0.1:8765/mcp` (`tmp/tasks/notes/T3-transport.md` §7).
-- Health probe: `curl -s -w '\nHTTP_STATUS:%{http_code}\n' http://127.0.0.1:8765/health`
-  returns `{"status":"loading"}` / 503 before the eager load finishes, then
-  `{"status":"ok"}` / 200 after (`laya-mcp/src/laya_mcp/daemon.py`,
-  `tmp/tasks/notes/T3-transport.md` §7).
-- Stop it with `kill <pid>` and confirm `lsof -nP -iTCP:8765 -sTCP:LISTEN` prints nothing
-  (`tmp/tasks/notes/T3-transport.md` §9).
+The checkpoints are good at different things, so a server may host several and let the caller pick. Match the checkpoint to the kind of judgment, not to the wording of the question.
 
-### Env vars, with their code defaults
+| The question is about | Use | Why |
+| --- | --- | --- |
+| the content of a text in hand — what it says, what it is, what it asks for | the English root | Screening, topical routing and claim-shaped checks are what it was trained on. |
+| an agent's own state or trace — did it do the thing, does this match the request | `laya-typed-decisions` | Agent-trace observability is one of its four training workflows, and it carries twice the token budget. |
+| text that is not English | the multilingual variant | The English root does not switch by itself. |
 
-- `LAYA_CHECKPOINT` — default `aac6fef/laya-mlx` (`laya-mcp/src/laya_mcp/server.py`
-  `DEFAULT_CHECKPOINT`).
-- `LAYA_DAEMON_URL` — default unset; when set, `laya_decide` forwards to
-  `f"{LAYA_DAEMON_URL}/predict"` first (`laya-mcp/src/laya_mcp/server.py` `_predict`).
-- `LAYA_MCP_HOST` — default `127.0.0.1` (`laya-mcp/src/laya_mcp/daemon.py` `DEFAULT_HOST`).
-- `LAYA_MCP_PORT` — default `8765` (`laya-mcp/src/laya_mcp/daemon.py` `DEFAULT_PORT`).
+Ask the server which names it accepts rather than guessing: a `/health` route or the tool's own schema lists them. When no `checkpoint` is passed the server default answers, and a good server says so in `route_reason` and `route_note` — read those rather than assuming the argument took effect.
 
-## One worked call, verbatim
+Measured on this deployment, one call per question. The English root answered a prompt-injection screen at 0.988 where `laya-typed-decisions` gave 0.674. It scored an exfiltration check at 0.862 where the other gave 0.486, on the wrong side of a half. On agent-trace questions the ordering reversed: the English root asserted that a user had requested a command they had not, at 0.883, while `laya-typed-decisions` returned 0.535 and tripped no gate. Treat the direction as real and the magnitudes as unconfirmed — single calls are reproducible here to four decimals, but one example says nothing about the next.
 
-Source: `tmp/tasks/notes/T2-setup.md` §6 (stdio run against the real checkpoint).
+## Reading the answer
 
-Request:
+`confidence` is not the winning option's probability. For `choice` and `score` it is normalized entropy over the whole distribution — an even spread reads low even when one option clearly leads. For `noul` it is `max(noul, 1 - noul)` and adds no information beyond `noul` itself. Read `probabilities` (or the `score`/`legend` pair) whenever the decision matters; use `confidence` only as a rough spread indicator.
+
+## Common pitfalls
+
+- **High cardinality collapses the distribution.** Verified in this session: the identical ambiguous ticket text held soft, plausible probabilities at 6 and 10 `choice` options (0.93/0.06 and 0.86/0.12 for the top two labels) but returned an exact `1`/`0` split — full certainty on one label, zero on every other — at 20 and 25 options, on wording a human would call genuinely ambiguous. Convai's own model card reports the same failure mode starting past roughly 20 options (Banking77 benchmark, 0.425 accuracy). Past that range, treat any reported confidence as uninformative rather than as evidence, and bucket into fewer top-level labels before asking, or fall back to escalation.
+- **A single-option `choice` always reports confidence `1.0`.** With only one label there is nothing to be uncertain about; the number is an artifact of the format, not a signal — this is what a one-criterion sanity call reproduces every time.
+- **Every checkpoint needs calibration for a new domain**, not just a well-worded question, and picking the right one is not a substitute. Convai's own card reports the English root at 0.362 on the typed-decisions benchmark, near chance, against 0.766 for `laya-typed-decisions` — so the checkpoint moves the starting point and never removes the step. Fit a threshold per question against a labelled sample from the real domain, and expect to need roughly 100 labelled rows per question before one holds. Read a distribution near even as "ask instead of act" until a threshold is fitted.
+- **Long input is truncated from the end, and the budget is per question.** Each question gets its own budget: `max_len` minus whatever that question's own instructions and rendered options consume. A `choice` with 20 long labels therefore truncates a state that the `noul` beside it reads in full, in the same call. Put what matters first, and do not judge an agent transcript on a checkpoint whose `max_len` it exceeds.
+- **A summed token count cannot detect that truncation.** `usage.input_tokens` sums one item per question, so three questions over a short state routinely pass `max_len` with nothing cut. Comparing that sum against `max_len` reports truncation that did not happen. Read the server's per-question `truncation` report instead, which names which fields lost input. Where a server offers no such report, shorten the state rather than inferring from token counts.
+- **Truncation changes the answer without looking wrong.** A 1107-token transcript whose decisive line sat at the end scored 0.500 on "did the tests pass" against 0.751 for the same line alone. Nothing in the distribution marks the difference. When a `truncation` report says a field was cut, reorder so the decisive material leads, split the state across calls, or reduce it before asking — do not read the number.
+
+## Examples
+
+**Right-sized call — three questions, ≤4 options each, batched in one call:**
 
 ```
-tool: laya_decide
 state: "I was billed twice this month. Please refund the duplicate charge."
 questions: {
-  "department": {
-    "type": "choice",
-    "instructions": "Who should handle this?",
-    "criteria": ["billing", "technical", "sales"]
-  }
+  "department": {"type": "choice", "instructions": "Who should handle this?",
+                 "criteria": ["billing", "technical", "sales"]},
+  "severity":   {"type": "score", "instructions": "How severe is this for the customer?",
+                 "criteria": ["trivial", "minor", "major", "critical"]},
+  "refund":     {"type": "noul", "instructions": "Does the customer ask for money back?"}
 }
 ```
 
-Response:
+Verified response from the English root, reproduced identically across separate calls and across a server restart:
 
 ```
-{
-  "model": "laya-rl-agent",
-  "answers": {
-    "department": {
-      "type": "choice",
-      "confidence": 0.7563,
-      "action": {"act_probability": 1.0},
-      "choice": "billing",
-      "probabilities": {"billing": 0.9375, "technical": 0.0478, "sales": 0.0147}
-    }
-  },
-  "usage": {"input_tokens": 31, "output_tokens": 0}
-}
+department → choice "billing", confidence 0.757, probabilities {billing 0.938, technical 0.048, sales 0.015}
+severity   → score 1.508 (between "minor" and "major"), confidence 0.133,
+             probabilities {trivial 0.114, minor 0.358, major 0.432, critical 0.095}
+refund     → noul 0.867, confidence 0.867
 ```
 
-This exact answer/confidence/probabilities pair reproduced identically over stdio
-(`tmp/tasks/notes/T2-setup.md` §6), over loopback HTTP (`tmp/tasks/notes/T3-transport.md` §8),
-and over a container-to-LAN call (`tmp/tasks/notes/T3-reachability.md` §14.6) — the model is
-deterministic for this input.
+Read `severity` as the model declining to separate "minor" from "major," not as `1.508` being an answer in itself — a low `confidence` on a `score` question is telling you that directly.
 
-## Latency expectations
+The same call on `laya-typed-decisions` answers `billing` at 0.793 rather than 0.938, `severity` 2.048 rather than 1.508, and `refund` 0.704 rather than 0.867. Both pick the same department. A threshold fitted against one checkpoint does not carry to the other, which is the practical reason to record which checkpoint answered alongside any number you keep.
 
-Every figure below is one host's single-run observation, not a benchmark
-(`tmp/tasks/notes/T1-setup.md` §7):
+**Wrong-sized call — the same kind of question, oversized, on the same underlying ambiguity:**
 
-- ~1365 ms — first-ever call in the process, includes first-time Metal-kernel JIT compile
-  for this schema shape (`tmp/tasks/notes/T1-setup.md` §6).
-- ~142 ms — first call in a fresh process, checkpoint already cached, no prior in-process
-  compile for this schema shape (`tmp/tasks/notes/T1-setup.md` §7).
-- ~22 ms — warm, same process, same schema shape already compiled (`tmp/tasks/notes/T1-setup.md` §7).
-- ~89 ms — warm process, first call of a different schema `type` (`noul` vs `choice`), pays
-  its own one-time compile (`tmp/tasks/notes/T1-setup.md` §7).
-- ~3578 ms — stdio end-to-end: process spawn, stdio handshake, lazy load, first `predict()`
-  (`tmp/tasks/notes/T2-setup.md` §6).
-- ~218 ms — loopback HTTP against a `laya-mcp-http` already eagerly loaded and warm
-  (`tmp/tasks/notes/T3-transport.md` §8).
-- ~2376 ms — container-to-LAN call, includes the MCP `initialize` handshake plus the
-  container-to-host network hop (`tmp/tasks/notes/T3-reachability.md` §14.6).
-- The vendor's 7–14 ms figure reproduces only on a fully warm process repeating the same
-  schema shape, and even then this host measured ~1.5–3x higher (`tmp/tasks/notes/T1-setup.md` §7).
-- Prefer the HTTP daemon over stdio for any repeated calls in one session.
+A 20-label routing call over an equally ambiguous support ticket ("app crashed at checkout again, third time this week, thinking about cancelling") returned `confidence 1.0` and a probability of exactly `1` on one label, `0` on the other 19 — even though the text plausibly touches at least three of those labels (a bug report, a churn risk, and a performance issue). Nothing in the response distinguishes this from a genuinely unambiguous case; only knowing the cardinality trap does.
 
-## Reaching the server from a container
+## References
 
-- From inside a container, `http://localhost:8765` and `http://127.0.0.1:8765` never reach
-  this host's server: they fail fast (connection-refused-class), not slow
-  (`tmp/tasks/notes/T3-reachability.md` §14.7).
-- Use the host's LAN IP instead, read at use time with `ipconfig getifaddr en0` — see
-  `.agent/docs/dev-workflows.md` for LAN-IP detection, the chosen port, the bind address,
-  and the firewall posture. Do not hardcode an IP; it is DHCP-assigned.
-- `host.docker.internal` is untested under Podman (`.agent/docs/dev-workflows.md`).
-
-## Traps
-
-- Every distinct schema shape pays its own one-time Metal-kernel compile, and every fresh
-  process pays a load: ~22 ms warm same-shape versus ~142 ms first-call-in-process and
-  ~89 ms first call of a new `type` (`tmp/tasks/notes/T1-setup.md` §7).
-- Round-trip cost is transport-dependent: ~3578 ms for a cold stdio spawn that lazy-loads
-  (`tmp/tasks/notes/T2-setup.md` §6), ~218 ms over loopback HTTP to an already-loaded
-  `laya-mcp-http` (`tmp/tasks/notes/T3-transport.md` §8), ~2376 ms from a container over the
-  LAN including the `initialize` handshake (`tmp/tasks/notes/T3-reachability.md` §14.6).
-  Prefer the HTTP daemon for repeated calls.
-- From inside a container, `http://localhost:8765` and `http://127.0.0.1:8765` never reach
-  this host's server — they fail fast, not slow. Use the LAN IP read at use time;
-  `host.docker.internal` is untested under Podman (`.agent/docs/dev-workflows.md`,
-  `tmp/tasks/notes/T3-reachability.md` §14.7).
-- The macOS Application Firewall blocks non-loopback inbound to the ad-hoc-signed Homebrew
-  `python@3.12` `Python.app` until that binary is in the allow list, and the symptom is a
-  silent ~6 s timeout, not a connection refusal. It is already allowed on this host; check
-  with `/usr/libexec/ApplicationFirewall/socketfilterfw --listapps | grep -i python`
-  (`tmp/tasks/notes/T3-reachability.md` §7, §14.8).
-- The real runtime API is `agent.predict(text, schema_dict)`, not `laya.choice(prompt, options)`;
-  the MCP tool renames that pair to `state`/`questions` (`tmp/tasks/notes/T1-setup.md` §3,
-  `laya-mcp/src/laya_mcp/server.py`).
-- The PyPI name `laya-mcp` belongs to an unrelated package; this project's distribution is
-  `ld-laya-mcp`, editable-install only and never published, so
-  `uv pip install -e ./laya-mcp` is the only correct install (`.agent/docs/sources.md`
-  `## Gotchas`, `tmp/tasks/notes/T2c-design.md` §1).
-- When `LAYA_DAEMON_URL` is set but unreachable, the call silently succeeds via a local load
-  and only a `logging.warning` records it — a crashed daemon looks like a working-but-slow
-  server (`laya-mcp/src/laya_mcp/server.py` `_predict`, `tmp/tasks/notes/T2c-design.md` §4).
-- A non-numeric `LAYA_MCP_PORT` crashes `laya-mcp-http` with a raw `ValueError` traceback
-  (`laya-mcp/src/laya_mcp/daemon.py:37`, `tmp/tasks/T3d-mcp-http-transport-first-party-follow-ups.md`).
-
-## Provenance
-
-This file follows the structural convention of `.agent/skills/daemon-lifecycle/SKILL.md`, but lives at `skills/laya-mcp/` in the repo root — maintained alongside the `laya-mcp/` server code, not as general `.agent/` domain knowledge — and is discoverable via a symlink at `.agent/skills/laya-mcp`. No third-party skill file was consulted.
+- Laya: laya.convaiinnovations.com, huggingface.co/convaiinnovations/laya, huggingface.co/convaiinnovations/laya-typed-decisions
+- System One models: docs.typesafe.ai/concepts/system-one
