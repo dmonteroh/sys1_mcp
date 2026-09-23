@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .server import (
+    TOOL_SURFACE,
     _default_route,
     _local_agent,
     _local_router,
@@ -29,6 +30,7 @@ from .server import (
     app,
     describe,
     predict_locally,
+    run_tool_locally,
 )
 
 DEFAULT_HOST = "127.0.0.1"
@@ -58,19 +60,8 @@ async def health(request: Request) -> JSONResponse:
             # while this lists it is looking at a cached schema, not a server that
             # ignored the argument.
             "tools": {
-                "laya_decide": {
-                    "arguments": ["state", "questions", "checkpoint"],
-                    "response_keys": [
-                        "answers",
-                        "usage",
-                        "checkpoint",
-                        "limits",
-                        "route",
-                        "route_reason",
-                        "served_by",
-                        "truncation",
-                    ],
-                }
+                name: {"arguments": spec["arguments"], "response_keys": spec["response_keys"]}
+                for name, spec in TOOL_SURFACE.items()
             },
             # The default route's own figures, flat, so probes written against the
             # single-checkpoint shape keep working.
@@ -93,6 +84,20 @@ async def predict(request: Request) -> JSONResponse:
         return JSONResponse({"error": "agent still loading"}, status_code=503)
     try:
         payload = await request.json()
+    except ValueError as exc:
+        return JSONResponse({"error": f"body is not JSON: {exc}"}, status_code=400)
+    if isinstance(payload, dict) and "tool" in payload:
+        # Every tool besides `laya_decide` travels this way, so a stdio process
+        # reaches all of them on the warm models without a route per tool. A
+        # model failure is not caught here: it must surface as a 500, never as an
+        # answer (`laya_screen` fails closed on it).
+        try:
+            return JSONResponse(
+                run_tool_locally(str(payload["tool"]), dict(payload.get("arguments") or {}))
+            )
+        except (TypeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
         state = payload["text"]
         questions = payload["schema"]
         checkpoint = payload.get("checkpoint")

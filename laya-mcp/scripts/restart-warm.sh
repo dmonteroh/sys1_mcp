@@ -119,6 +119,8 @@ handshake() {
 }
 
 warm_call() {
+	# The state and the NOUL question below are laya_mcp.server WARM_STATE / WARM_NOUL,
+	# which laya_health probes with; keep them identical or its latency includes a compile.
 	# $1 = label for the report, $2 = the `questions` object as JSON,
 	# $3 = the checkpoint route to warm.
 	local label=$1 questions=$2 route=$3 payload started elapsed
@@ -138,6 +140,21 @@ warm_call() {
 		return 1
 	fi
 	printf '  %-18s %-16s ok (%ss)\n' "$label" "$route" "$elapsed"
+}
+
+warm_tool() {
+	# $1 = label, $2 = tool name, $3 = arguments as JSON, $4 = a key the answer must hold.
+	local label=$1 tool=$2 arguments=$3 key=$4 payload started elapsed
+	payload=$(printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$tool" "$arguments")
+	started=$(date +%s)
+	mcp_post "$payload" > "$body_file"
+	elapsed=$(( $(date +%s) - started ))
+	if grep -q '"isError":true' "$body_file" || ! grep -q "\"${key}\"" "$body_file"; then
+		printf '  %-18s %-16s FAILED after %ss\n' "$label" "$tool" "$elapsed" >&2
+		sed -n 's/^data: //p' "$body_file" >&2
+		return 1
+	fi
+	printf '  %-18s %-16s ok (%ss)\n' "$label" "$tool" "$elapsed"
 }
 
 if [ "$do_restart" -eq 1 ]; then restart; fi
@@ -161,6 +178,15 @@ for route in $ROUTES; do
 	warm_call 'noul' "$NOUL" "$route" || status=1
 	warm_call 'choice+score+noul' "$ALL" "$route" || status=1
 done
+
+# The batched tools build batches of a different shape from any single call, and
+# laya_screen always runs its own four-question schema on the English route.
+printf 'warming batched tools\n'
+warm_tool 'screen' laya_screen '{"text":"## Setup\n\nRun npm install, then npm start."}' per_chunk || status=1
+for route in $ROUTES; do
+	warm_tool "classify ${route}" laya_classify "{\"items\":[\"I was billed twice.\",\"The app crashes on start.\",\"Can I get a quote?\"],\"questions\":${ALL},\"checkpoint\":\"${route}\"}" items || status=1
+done
+warm_tool 'health' laya_health '{}' probe_ms || status=1
 
 if [ "$status" -ne 0 ]; then
 	printf 'one or more warm-up calls failed; the server is up but not fully warmed\n' >&2
