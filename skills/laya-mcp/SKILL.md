@@ -32,11 +32,11 @@ Reach for it instead of a second LLM call whose only job is to pick a label, gra
 
 `state` is the text to judge, in plain natural language. `questions` maps a field name you choose to one question spec; every spec carries `type` and `instructions`, written as the question itself in a short phrase. Put every question a decision needs into one call — they run as one batch, so three questions cost far less than three separate calls. `checkpoint` is optional and names which weights answer. See **Choosing a checkpoint**.
 
-| `type` | `criteria` | Answer fields |
-| --- | --- | --- |
-| `choice` | required — unique label strings, or a label-to-description map | `choice` (winning label), `probabilities` (label → probability) |
-| `score` | required — level labels, lowest first | `score` (expected level index, a fraction from `0` to `len(criteria) - 1`), `legend` (index → label), `probabilities` (index → probability) |
-| `noul` | optional — a `{false, true}` description pair | `noul` (probability the statement is true) |
+| `type`   | `criteria`                                                     | Answer fields                                                                                                                               |
+| -------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `choice` | required — unique label strings, or a label-to-description map | `choice` (winning label), `probabilities` (label → probability)                                                                             |
+| `score`  | required — level labels, lowest first                          | `score` (expected level index, a fraction from `0` to `len(criteria) - 1`), `legend` (index → label), `probabilities` (index → probability) |
+| `noul`   | optional — a `{false, true}` description pair                  | `noul` (probability the statement is true)                                                                                                  |
 
 A `choice` or `score` spec with no `criteria` is rejected before any model call runs.
 
@@ -46,11 +46,11 @@ Alongside `answers`, a well-built server returns the facts a caller needs to tru
 
 The checkpoints are good at different things, so a server may host several and let the caller pick. Match the checkpoint to the kind of judgment, not to the wording of the question.
 
-| The question is about | Use | Why |
-| --- | --- | --- |
-| the content of a text in hand — what it says, what it is, what it asks for | the English root | Screening, topical routing and claim-shaped checks are what it was trained on. |
-| an agent's own state or trace — did it do the thing, does this match the request | `laya-typed-decisions` | Agent-trace observability is one of its four training workflows, and it carries twice the token budget. |
-| text that is not English | the multilingual variant | The English root does not switch by itself. |
+| The question is about                                                            | Use                      | Why                                                                                                     |
+| -------------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| the content of a text in hand — what it says, what it is, what it asks for       | the English root         | Screening, topical routing and claim-shaped checks are what it was trained on.                          |
+| an agent's own state or trace — did it do the thing, does this match the request | `laya-typed-decisions`   | Agent-trace observability is one of its four training workflows, and it carries twice the token budget. |
+| text that is not English                                                         | the multilingual variant | The English root does not switch by itself.                                                             |
 
 Ask the server which names it accepts rather than guessing: a `/health` route or the tool's own schema lists them. When no `checkpoint` is passed the server default answers, and a good server says so in `route_reason` and `route_note` — read those rather than assuming the argument took effect.
 
@@ -100,8 +100,3 @@ The same call on `laya-typed-decisions` answers `billing` at 0.793 rather than 0
 **Wrong-sized call — the same kind of question, oversized, on the same underlying ambiguity:**
 
 A 20-label routing call over an equally ambiguous support ticket ("app crashed at checkout again, third time this week, thinking about cancelling") returned `confidence 1.0` and a probability of exactly `1` on one label, `0` on the other 19 — even though the text plausibly touches at least three of those labels (a bug report, a churn risk, and a performance issue). Nothing in the response distinguishes this from a genuinely unambiguous case; only knowing the cardinality trap does.
-
-## References
-
-- Laya: laya.convaiinnovations.com, huggingface.co/convaiinnovations/laya, huggingface.co/convaiinnovations/laya-typed-decisions
-- System One models: docs.typesafe.ai/concepts/system-one
