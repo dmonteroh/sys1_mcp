@@ -179,6 +179,16 @@ Flags and env vars:
 
 Restart behaviour: it runs `launchctl kickstart -k gui/$(id -u)/com.ld-mcp.laya-mcp-http` when the agent is loaded, falls back to `launchctl bootstrap` from `~/Library/LaunchAgents/com.ld-mcp.laya-mcp-http.plist` when it is not, and exits 1 with instructions when neither applies. It exits 1 on a health timeout or a failed warm-up call, printing the server's own error.
 
+### Identity check
+
+After warming, the script runs `laya-mcp/scripts/check-identity.py`. It compares what the daemon serves against `laya-mcp/deploy/identity.lock.json`: per route, the checkpoint, the Hugging Face snapshot, the sha256 of `rl_agent_config.json` (every calibration temperature) and the token limits, plus the `laya_mlx` version and the default route. On any difference it names the field and exits 1, and the server stays up. Every figure measured against this server, in the skill and in `tmp/tasks/notes/`, holds only for the locked identity. After an intended checkpoint, config or runtime change, re-measure what depends on it, then record the new identity:
+
+```
+$ python3 laya-mcp/scripts/check-identity.py --write
+```
+
+The response's `model` field is a runtime constant (`laya-rl-agent`) on every checkpoint, so the check never reads it. Design: `tmp/tasks/notes/T11-calibration.md` §6.
+
 To restart by hand without the script:
 
 ```
@@ -306,4 +316,5 @@ These are the documented config shapes for each client. Claude Code is registere
 - `.agent/docs/dev-workflows.md` — LAN IP, port, bind address, and firewall decisions.
 - `laya-mcp/deploy/com.ld-mcp.laya-mcp-http.plist` — the persistent LaunchAgent configuration.
 - `laya-mcp/scripts/restart-warm.sh` — restart the LaunchAgent and warm every question type.
+- `laya-mcp/scripts/check-identity.py` and `laya-mcp/deploy/identity.lock.json` — the served-identity lock and its check.
 - `research.md` — the original research brief this setup was built from.

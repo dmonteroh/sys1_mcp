@@ -192,4 +192,7 @@ if [ "$status" -ne 0 ]; then
 	printf 'one or more warm-up calls failed; the server is up but not fully warmed\n' >&2
 	exit 1
 fi
+# A restart is when a checkpoint, config or runtime change takes effect, so check
+# the served identity against the lock here. The server stays up either way.
+LAYA_MCP_URL=$BASE_URL python3 "$(dirname "$0")/check-identity.py" || exit 1
 printf 'laya-mcp is up and warm at %s/mcp\n' "$BASE_URL"

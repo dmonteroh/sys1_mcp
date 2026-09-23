@@ -10,6 +10,8 @@ its own: `laya_mcp.__init__` runs it over stdio and `laya_mcp.daemon` over
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import logging
 import math
 import os
@@ -528,6 +530,13 @@ def _snapshot(agent: Any) -> str | None:
     return None
 
 
+def _config_sha256(agent: Any) -> str | None:
+    """Hash of the checkpoint's `rl_agent_config.json`, which holds every
+    calibration temperature, so a config-only change is visible too."""
+    path = agent.model_dir / "rl_agent_config.json"
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
 def health_locally() -> dict[str, Any]:
     started = time.perf_counter()
     routes: dict[str, Any] = {}
@@ -540,6 +549,7 @@ def health_locally() -> dict[str, Any]:
             routes[name] = {
                 **describe(agent, name),
                 "snapshot": _snapshot(agent),
+                "config_sha256": _config_sha256(agent),
                 "dtype": str(agent.dtype).removeprefix("mlx.core."),
                 "batch_size": agent.batch_size,
                 "prefix_cache": agent._prefix_cache is not None,
@@ -550,6 +560,7 @@ def health_locally() -> dict[str, Any]:
         "status": "ok",
         "default_route": _default_route(),
         "routes": routes,
+        "runtime": {"laya_mlx": importlib.metadata.version("laya-mlx")},
         "tools": sorted(TOOL_SURFACE),
         "inference_ms": round((time.perf_counter() - started) * 1000, 1),
     }
@@ -804,7 +815,9 @@ TOOL_SURFACE: dict[str, dict[str, Any]] = {
     },
     "laya_health": {
         "arguments": [],
-        "response_keys": ["status", "default_route", "routes", "tools", "round_trip_ms", "served_by"],
+        "response_keys": [
+            "status", "default_route", "routes", "runtime", "tools", "round_trip_ms", "served_by",
+        ],
         "local": health_locally,
     },
 }
@@ -971,9 +984,10 @@ def laya_health() -> dict[str, Any]:
     it runs one real warm-path inference per loaded checkpoint and times it.
 
     Returns `routes`, one entry per loaded checkpoint, each with `checkpoint`
-    (the weights), `snapshot` (the exact revision on disk), `limits` (`max_len`,
-    `head_max_len`), `dtype`, and `probe_ms` (that inference, measured in this
-    call). `default_route` is the checkpoint a call without `checkpoint` gets,
+    (the weights), `snapshot` (the exact revision on disk), `config_sha256` (its
+    calibration config), `limits` (`max_len`, `head_max_len`), `dtype`, and
+    `probe_ms` (that inference, measured in this call). `runtime` gives the
+    `laya_mlx` version. `default_route` is the checkpoint a call without `checkpoint` gets,
     `round_trip_ms` is the whole call as this server saw it — including the hop
     to the daemon when `served_by` is `daemon` — and `tools` lists what this
     server offers. Warm figures are tens of milliseconds per probe; seconds mean
