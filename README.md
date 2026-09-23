@@ -58,7 +58,18 @@ $ curl -s https://localhost:8765/health
 
 ### Two checkpoints, chosen per call
 
-The daemon holds both resident and `laya_decide` takes an optional `checkpoint`: `base` for judging the content of a text (screening, injection detection, classification), `typed-decisions` — the default — for judging an agent's own state and for input over 512 tokens. `/health` also lists the tool's argument and response keys, so a client holding a stale cached tool list is diagnosable with one request rather than looking like a routing bug. Measurement behind the split, and the reason to gate screening on a `directed` question rather than an `injection` one, is in `tmp/tasks/notes/T13-dual-checkpoint-routing.md`.
+The daemon holds both resident and `laya_decide` takes an optional `checkpoint`: `base` for judging the content of a text (screening, injection detection, classification), `typed-decisions` — the default — for judging an agent's own state and for input over 512 tokens. `/health` also lists the tool's argument and response keys, so a client holding a stale cached tool list is diagnosable with one request rather than looking like a routing bug. Measurement behind the split is in `tmp/tasks/notes/T13-dual-checkpoint-routing.md`.
+
+### Tools
+
+| Tool | For | Design record |
+|---|---|---|
+| `laya_decide` | any closed question about one text | `tmp/tasks/notes/T2c-design.md` |
+| `laya_classify` | one schema over up to 256 texts, batched | `tmp/tasks/notes/T10-classify-batching.md` |
+| `laya_screen` | untrusted text, chunked so nothing is truncated, on the `english` route | `tmp/tasks/notes/T9-screen-calibration.md` |
+| `laya_health` | loaded checkpoints, snapshots, budgets, and a timed probe | `tmp/tasks/notes/T8-health-tool-verification.log` |
+
+When a new tool is justified is set in `tmp/tasks/notes/T7-tool-surface.md`. Every tool besides `laya_decide` reaches the daemon over the existing `/predict` route as `{"tool", "arguments"}`, so a stdio client gets all four on the warm models.
 
 Env vars, with their code defaults (`laya-mcp/src/laya_mcp/server.py`, `laya-mcp/src/laya_mcp/daemon.py`):
 
@@ -142,7 +153,7 @@ stopped (`launchctl bootout gui/$(id -u)/com.ld-mcp.laya-mcp-http`).
 
 ## Restarting and warming
 
-`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then sends one `laya_decide` call per question type (`choice`, `score`, `noul`) plus one batched call of all three, so the first real call does not pay a Metal-kernel compile (see `skills/laya-mcp/SKILL.md`'s Traps, where each distinct schema shape pays its own one-time compile).
+`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then sends one `laya_decide` call per question type (`choice`, `score`, `noul`) plus one batched call of all three on each route, then one `laya_screen`, one `laya_classify` per route and one `laya_health`, so the first real call does not pay a Metal-kernel compile (see `skills/laya-mcp/SKILL.md`'s Traps, where each distinct schema shape pays its own one-time compile).
 
 ```
 $ ./laya-mcp/scripts/restart-warm.sh
@@ -205,7 +216,9 @@ Holding both checkpoints resident, measured 2026-09-22 against the live LaunchAg
 | idle `rss` | 976 MB | 1788 MB |
 | idle `phys_footprint` | 920 MB | 1735 MB |
 
-The second checkpoint costs about 815 MB and 820 ms. Set `LAYA_PRELOAD=0` to build only the default route and pay the other one's load on first use instead.
+The second checkpoint costs about 815 MB and 820 ms.
+
+MLX keeps freed Metal buffers in a cache that is unbounded by default, and every batch shape leaves its own. Before a cap existed, measured 2026-09-23: 8,457 MB `phys_footprint` after a round of mixed calls, and 11 GB after one 256-item `laya_classify`. The server now caps the cache at 512 MiB (`laya-mcp/src/laya_mcp/server.py` `MLX_CACHE_LIMIT_BYTES`). With the cap, the footprint was 2,341 MB after restart and warm-up and 2,348 MB after two 256-item batches, with no change in speed (`tmp/tasks/notes/T10-classify-batching.md`). Set `LAYA_PRELOAD=0` to build only the default route and pay the other one's load on first use instead.
 
 Startup cost, single-checkpoint run:
 
@@ -279,14 +292,17 @@ Codex reads `~/.codex/config.toml`, under an `[mcp_servers.<name>]` table with a
 ```toml
 [mcp_servers.laya-mcp]
 url = "https://localhost:8765/mcp"
+default_tools_approval_mode = "approve"
 ```
 
+Without `default_tools_approval_mode`, Codex asks before every call, and `codex exec` fails the call outright ("MCP tool call requires approval, but approval policy is never"). Every Laya tool is local and read-only, so auto-approving this one server is safe. Key found in the Codex 0.155.1 binary's config schema; accepted values are `auto`, `prompt`, `writes`, `approve`.
+
 No block above needs a bearer token or auth header — this server has no auth, so there is nothing to configure for any client.
-These are the documented config shapes for each client. Claude Code is registered at user scope, so every repo on this machine sees the tool: `claude mcp add --scope user --transport http laya-mcp https://localhost:8765/mcp`, and `claude mcp list` reports it connected with no extra CA configuration (verified 2026-09-23). The agent skill is linked at user scope as well, as `~/.claude/skills/laya-mcp` → `skills/laya-mcp`. No `.mcp.json` exists, and `~/.codex/config.toml` has no `laya` entry (checked 2026-09-22).
+These are the documented config shapes for each client. Claude Code is registered at user scope, so every repo on this machine sees the tool: `claude mcp add --scope user --transport http laya-mcp https://localhost:8765/mcp`, and `claude mcp list` reports it connected with no extra CA configuration (verified 2026-09-23). The agent skill is linked at user scope as well, as `~/.claude/skills/laya-mcp` → `skills/laya-mcp`. Codex is registered too, with `codex mcp add laya-mcp --url https://localhost:8765/mcp` plus the approval key above, and its skill is linked as `~/.codex/skills/laya-mcp` → `skills/laya-mcp`. Verified 2026-09-23: a `codex exec` run called `laya_decide` and got `served_by: local` from `aac6fef/laya-typed-decisions-mlx`, with no extra CA configuration. No `.mcp.json` exists.
 
 ## Pointers
 
-- `skills/laya-mcp/SKILL.md` — the agent-facing doc: tool contract, transport choice, worked call, latency, traps.
+- `skills/laya-mcp/SKILL.md` — the agent-facing doc: which tool to use, the question contract, how to write questions, screening, and pitfalls.
 - `.agent/docs/dev-workflows.md` — LAN IP, port, bind address, and firewall decisions.
 - `laya-mcp/deploy/com.ld-mcp.laya-mcp-http.plist` — the persistent LaunchAgent configuration.
 - `laya-mcp/scripts/restart-warm.sh` — restart the LaunchAgent and warm every question type.
