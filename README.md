@@ -282,7 +282,7 @@ url = "https://localhost:8765/mcp"
 ```
 
 No block above needs a bearer token or auth header — this server has no auth, so there is nothing to configure for any client.
-These are the documented config shapes for each client. No client is currently registered against this server: `.mcp.json` does not exist and `~/.codex/config.toml` holds no `laya` entry (checked 2026-09-22).
+These are the documented config shapes for each client. Claude Code is registered at user scope, so every repo on this machine sees the tool: `claude mcp add --scope user --transport http laya-mcp https://localhost:8765/mcp`, and `claude mcp list` reports it connected with no extra CA configuration (verified 2026-09-23). The agent skill is linked at user scope as well, as `~/.claude/skills/laya-mcp` → `skills/laya-mcp`. No `.mcp.json` exists, and `~/.codex/config.toml` has no `laya` entry (checked 2026-09-22).
 
 ## Pointers
 
