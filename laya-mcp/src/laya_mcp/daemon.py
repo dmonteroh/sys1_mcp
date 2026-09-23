@@ -87,7 +87,7 @@ async def predict(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": f"body is not JSON: {exc}"}, status_code=400)
     if isinstance(payload, dict) and "tool" in payload:
-        # Every tool besides `laya_decide` travels this way, so a stdio process
+        # Every tool besides `laya_ask` travels this way, so a stdio process
         # reaches all of them on the warm models without a route per tool. A
         # model failure is not caught here: it must surface as a 500, never as an
         # answer (`laya_screen` fails closed on it).

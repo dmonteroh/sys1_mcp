@@ -124,7 +124,7 @@ warm_call() {
 	# $1 = label for the report, $2 = the `questions` object as JSON,
 	# $3 = the checkpoint route to warm.
 	local label=$1 questions=$2 route=$3 payload started elapsed
-	payload=$(printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"laya_decide","arguments":{"state":"A customer writes: I was billed twice this month. Please refund the duplicate charge.","questions":%s,"checkpoint":"%s"}}}' "$questions" "$route")
+	payload=$(printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"laya_ask","arguments":{"state":"A customer writes: I was billed twice this month. Please refund the duplicate charge.","questions":%s,"checkpoint":"%s"}}}' "$questions" "$route")
 	started=$(date +%s)
 	mcp_post "$payload" > "$body_file"
 	elapsed=$(( $(date +%s) - started ))

@@ -1,6 +1,6 @@
 """Shared MCP app for laya-mcp.
 
-Defines one `FastMCP` instance and its tools: `laya_decide`, the generic escape
+Defines one `FastMCP` instance and its tools: `laya_ask`, the generic escape
 hatch, plus `laya_health`, `laya_screen` and `laya_classify`, which each fix a
 schema or a capability the generic tool cannot express
 (`tmp/tasks/notes/T7-tool-surface.md`). This module holds no transport choice of
@@ -749,7 +749,7 @@ def screen_locally(text: str) -> dict[str, Any]:
 # `/predict` dispatches on it, and `/health` and `laya_health` list it, so a client
 # holding a stale cached tool list can see what the server actually offers.
 TOOL_SURFACE: dict[str, dict[str, Any]] = {
-    "laya_decide": {
+    "laya_ask": {
         "arguments": ["state", "questions", "checkpoint"],
         "response_keys": [
             "answers", "usage", "checkpoint", "limits", "route", "route_reason", "served_by",
@@ -781,7 +781,7 @@ TOOL_SURFACE: dict[str, dict[str, Any]] = {
 
 
 def run_tool_locally(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Run one non-`laya_decide` tool in this process. The daemon's `/predict` calls this."""
+    """Run one non-`laya_ask` tool in this process. The daemon's `/predict` calls this."""
     spec = TOOL_SURFACE.get(tool)
     if spec is None or "local" not in spec:
         raise ValueError(f"unknown tool {tool!r}; choose one of {sorted(TOOL_SURFACE)}")
@@ -838,7 +838,7 @@ def _dispatch(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.tool
-def laya_decide(
+def laya_ask(
     state: Annotated[
         str,
         Field(description="The text to judge, as plain natural language."),
@@ -870,8 +870,10 @@ def laya_decide(
 
     Laya is a classifier, not a language model: it scores options you supply and
     returns a probability distribution in tens of milliseconds, generating no text.
-    Use it for a closed decision about `state` — pick a label, rate a level, test a
-    statement — when you want a number to act on. For many texts against one
+    Every question must be closed. It cannot answer "why" or "what", and every
+    answer is one of the options you listed. Use it for a closed decision about
+    `state` — pick a label, rate a level, test a statement — when you want a
+    number to act on. For many texts against one
     schema use `laya_classify`; for fetched or untrusted text use `laya_screen`.
 
     `questions` maps a field name you choose to a spec with `type`, `instructions`
@@ -1015,27 +1017,27 @@ def laya_classify(
     ],
     questions: Annotated[
         dict[str, Any],
-        Field(description="One question schema, asked of every item. Same shape as `laya_decide`'s `questions`."),
+        Field(description="One question schema, asked of every item. Same shape as `laya_ask`'s `questions`."),
     ],
     checkpoint: Annotated[
         str | None,
-        Field(description="`base` or `typed-decisions`, as for `laya_decide`. Omit for the server default."),
+        Field(description="`base` or `typed-decisions`, as for `laya_ask`. Omit for the server default."),
     ] = None,
 ) -> dict[str, Any]:
     """Ask the same Laya questions of many texts in one call.
 
     Use it to sort, route, or triage a list — files, log lines, search results,
     tickets, commits — against one fixed schema. One call replaces one
-    `laya_decide` per item: the items share batched forward passes and a question
-    prefix built once. Probabilities match `laya_decide`'s to within about 0.001
+    `laya_ask` per item: the items share batched forward passes and a question
+    prefix built once. Probabilities match `laya_ask`'s to within about 0.001
     (the GPU kernel varies slightly with batch height; no winning label changed in
     testing). 256 items with three questions take about 6 s warm.
 
-    `questions` follows `laya_decide`'s rules (types, `criteria`, how to write
+    `questions` follows `laya_ask`'s rules (types, `criteria`, how to write
     them, how to read `probabilities`, `margin` and `noul`).
 
     Returns `items` in input order, each with `id` (yours, or the index as a
-    string), `answers` (the same shape `laya_decide` returns), and `truncated`
+    string), `answers` (the same shape `laya_ask` returns), and `truncated`
     (the questions for which that item's text was cut from the end — an empty
     list means it was read whole). `truncation.truncated_items` lists every cut
     item's id; in a long list, check it rather than scanning. `truncation` also

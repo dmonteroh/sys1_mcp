@@ -58,18 +58,18 @@ $ curl -s https://localhost:8765/health
 
 ### Two checkpoints, chosen per call
 
-The daemon holds both resident and `laya_decide` takes an optional `checkpoint`: `base` for judging the content of a text (screening, injection detection, classification), `typed-decisions` — the default — for judging an agent's own state and for input over 512 tokens. `/health` also lists the tool's argument and response keys, so a client holding a stale cached tool list is diagnosable with one request rather than looking like a routing bug. Measurement behind the split is in `tmp/tasks/notes/T13-dual-checkpoint-routing.md`.
+The daemon holds both resident and `laya_ask` takes an optional `checkpoint`: `base` for judging the content of a text (screening, injection detection, classification), `typed-decisions` — the default — for judging an agent's own state and for input over 512 tokens. `/health` also lists the tool's argument and response keys, so a client holding a stale cached tool list is diagnosable with one request rather than looking like a routing bug. Measurement behind the split is in `tmp/tasks/notes/T13-dual-checkpoint-routing.md`.
 
 ### Tools
 
 | Tool | For | Design record |
 |---|---|---|
-| `laya_decide` | any closed question about one text | `tmp/tasks/notes/T2c-design.md` |
+| `laya_ask` | any closed question about one text | `tmp/tasks/notes/T2c-design.md` |
 | `laya_classify` | one schema over up to 256 texts, batched | `tmp/tasks/notes/T10-classify-batching.md` |
 | `laya_screen` | untrusted text, chunked so nothing is truncated, on the `english` route | `tmp/tasks/notes/T9-screen-calibration.md` |
 | `laya_health` | loaded checkpoints, snapshots, budgets, and a timed probe | `tmp/tasks/notes/T8-health-tool-verification.log` |
 
-When a new tool is justified is set in `tmp/tasks/notes/T7-tool-surface.md`. Every tool besides `laya_decide` reaches the daemon over the existing `/predict` route as `{"tool", "arguments"}`, so a stdio client gets all four on the warm models.
+When a new tool is justified is set in `tmp/tasks/notes/T7-tool-surface.md`. Every tool besides `laya_ask` reaches the daemon over the existing `/predict` route as `{"tool", "arguments"}`, so a stdio client gets all four on the warm models.
 
 Env vars, with their code defaults (`laya-mcp/src/laya_mcp/server.py`, `laya-mcp/src/laya_mcp/daemon.py`):
 
@@ -153,7 +153,7 @@ stopped (`launchctl bootout gui/$(id -u)/com.ld-mcp.laya-mcp-http`).
 
 ## Restarting and warming
 
-`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then sends one `laya_decide` call per question type (`choice`, `score`, `noul`) plus one batched call of all three on each route, then one `laya_screen`, one `laya_classify` per route and one `laya_health`, so the first real call does not pay a Metal-kernel compile (see `skills/laya-mcp/SKILL.md`'s Traps, where each distinct schema shape pays its own one-time compile).
+`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then sends one `laya_ask` call per question type (`choice`, `score`, `noul`) plus one batched call of all three on each route, then one `laya_screen`, one `laya_classify` per route and one `laya_health`, so the first real call does not pay a Metal-kernel compile (see `skills/laya-mcp/SKILL.md`'s Traps, where each distinct schema shape pays its own one-time compile).
 
 ```
 $ ./laya-mcp/scripts/restart-warm.sh
@@ -192,7 +192,7 @@ Every figure below is one host's single-sample observation, not a benchmark
 
 - ~38 MiB (39008 KiB) — idle `ps` RSS, persistent LaunchAgent, after a 67 s idle wait (`tmp/tasks/notes/T5-resource-profile.md` §3).
 - 0.1 — idle `ps` `%CPU` (lifetime average, not a short-interval sample) (`tmp/tasks/notes/T5-resource-profile.md` §3).
-- ~107 MiB (109920 KiB) — `ps` RSS immediately after one `laya_decide` call, a delta of +69.25 MiB over idle (`tmp/tasks/notes/T5-resource-profile.md` §4).
+- ~107 MiB (109920 KiB) — `ps` RSS immediately after one `laya_ask` call, a delta of +69.25 MiB over idle (`tmp/tasks/notes/T5-resource-profile.md` §4).
 - ~41 MiB (42192 KiB) — post-load idle re-sample RSS after another 67 s wait, only +3.11 MiB above the original idle figure (`tmp/tasks/notes/T5-resource-profile.md` §5).
 - `top -l 1`'s `MEM`/`rsize` reads far higher than `ps`'s `rss` at every sample (923M idle, 1002M after the call) — the two tools disagree by design, `ps`'s `%cpu` is a lifetime average while `top -l 1`'s is a short-interval sample (`tmp/tasks/notes/T5-resource-profile.md` §3, §6, §7).
 - `laya-mlx` runs on Metal via unified memory, so some model memory may sit outside the measured `rss`/`rsize` figures entirely — these are a lower bound, not a full accounting (`tmp/tasks/notes/T5-resource-profile.md` §7).
@@ -298,7 +298,7 @@ default_tools_approval_mode = "approve"
 Without `default_tools_approval_mode`, Codex asks before every call, and `codex exec` fails the call outright ("MCP tool call requires approval, but approval policy is never"). Every Laya tool is local and read-only, so auto-approving this one server is safe. Key found in the Codex 0.155.1 binary's config schema; accepted values are `auto`, `prompt`, `writes`, `approve`.
 
 No block above needs a bearer token or auth header — this server has no auth, so there is nothing to configure for any client.
-These are the documented config shapes for each client. Claude Code is registered at user scope, so every repo on this machine sees the tool: `claude mcp add --scope user --transport http laya-mcp https://localhost:8765/mcp`, and `claude mcp list` reports it connected with no extra CA configuration (verified 2026-09-23). The agent skill is linked at user scope as well, as `~/.claude/skills/laya-mcp` → `skills/laya-mcp`. Codex is registered too, with `codex mcp add laya-mcp --url https://localhost:8765/mcp` plus the approval key above, and its skill is linked as `~/.codex/skills/laya-mcp` → `skills/laya-mcp`. Verified 2026-09-23: a `codex exec` run called `laya_decide` and got `served_by: local` from `aac6fef/laya-typed-decisions-mlx`, with no extra CA configuration. No `.mcp.json` exists.
+These are the documented config shapes for each client. Claude Code is registered at user scope, so every repo on this machine sees the tool: `claude mcp add --scope user --transport http laya-mcp https://localhost:8765/mcp`, and `claude mcp list` reports it connected with no extra CA configuration (verified 2026-09-23). The agent skill is linked at user scope as well, as `~/.claude/skills/laya-mcp` → `skills/laya-mcp`. Codex is registered too, with `codex mcp add laya-mcp --url https://localhost:8765/mcp` plus the approval key above, and its skill is linked as `~/.codex/skills/laya-mcp` → `skills/laya-mcp`. Verified 2026-09-23: a `codex exec` run called `laya_ask` and got `served_by: local` from `aac6fef/laya-typed-decisions-mlx`, with no extra CA configuration. No `.mcp.json` exists.
 
 ## Pointers
 
