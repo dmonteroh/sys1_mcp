@@ -186,6 +186,8 @@ warm_tool 'screen' laya_screen '{"text":"## Setup\n\nRun npm install, then npm s
 for route in $ROUTES; do
 	warm_tool "classify ${route}" laya_classify "{\"items\":[\"I was billed twice.\",\"The app crashes on start.\",\"Can I get a quote?\"],\"questions\":${ALL},\"checkpoint\":\"${route}\"}" items || status=1
 done
+# laya_relevant is always the typed-decisions route, regardless of $ROUTES.
+warm_tool 'relevant' laya_relevant '{"task":"Fix the off-by-one in the pagination cursor","context":"This module also defines the CSV export helper, unrelated to pagination."}' answers || status=1
 warm_tool 'health' laya_health '{}' probe_ms || status=1
 
 if [ "$status" -ne 0 ]; then

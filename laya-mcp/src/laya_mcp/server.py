@@ -1,8 +1,8 @@
 """Shared MCP app for laya-mcp.
 
 Defines one `FastMCP` instance and its tools: `laya_ask`, the generic escape
-hatch, plus `laya_health`, `laya_screen` and `laya_classify`, which each fix a
-schema or a capability the generic tool cannot express
+hatch, plus `laya_health`, `laya_screen`, `laya_classify` and `laya_relevant`,
+which each fix a schema or a capability the generic tool cannot express
 (`tmp/tasks/notes/T7-tool-surface.md`). This module holds no transport choice of
 its own: `laya_mcp.__init__` runs it over stdio and `laya_mcp.daemon` over
 `streamable-http`.
@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import json
 import logging
+import logging.handlers
 import math
 import os
 import threading
@@ -43,6 +45,21 @@ MLX_CACHE_LIMIT_BYTES = 512 * 1024 * 1024
 # figure and the probe itself never pays a Metal-kernel compile. Keep the two in sync.
 WARM_STATE = "A customer writes: I was billed twice this month. Please refund the duplicate charge."
 WARM_NOUL = {"refund": {"type": "noul", "instructions": "Does the customer ask for money back?"}}
+
+# Structured per-call logging: this server runs single-user and local-only, so the
+# tradeoff is disk growth and secrets-at-rest, not a second party ever reading it
+# (README.md "Call logging"). Rotated JSONL, 3 files of 10 MiB by default — a call
+# runs 1-3 KB logged, so that's low thousands of calls of history before the
+# oldest rotates out, enough to see route/margin/truncation patterns.
+CALL_LOG_ENABLED = os.environ.get("LAYA_CALL_LOG", "1") not in ("0", "", "false", "False")
+CALL_LOG_PATH = os.path.expanduser(
+    os.environ.get("LAYA_CALL_LOG_PATH", "~/Library/Logs/laya-mcp/calls.jsonl")
+)
+CALL_LOG_MAX_BYTES = int(os.environ.get("LAYA_CALL_LOG_MAX_BYTES", 10 * 1024 * 1024))
+CALL_LOG_BACKUPS = int(os.environ.get("LAYA_CALL_LOG_BACKUPS", 2))
+# Above this `sensitive_data` probability, a logged text argument is replaced by
+# its score and length rather than its content.
+CALL_LOG_REDACT_THRESHOLD = float(os.environ.get("LAYA_CALL_LOG_REDACT_THRESHOLD", 0.5))
 
 # Two checkpoints, held resident together, because measurement says neither wins
 # outright. `laya_mlx.Router`'s own slot names are reused rather than invented, so
@@ -78,6 +95,9 @@ app = FastMCP("laya")
 # one Metal device, so serializing across them is the honest granularity.
 _inference_lock = threading.Lock()
 _router: Any = None
+
+_call_log_lock = threading.Lock()
+_call_logger_singleton: logging.Logger | None = None
 
 
 def _routes() -> dict[str, str]:
@@ -786,6 +806,147 @@ def screen_locally(text: str) -> dict[str, Any]:
     }
 
 
+# A judgment about the agent's own task state (is X needed for Y), not about
+# the content of `context` — so it is fixed to `typed-decisions`, same reasoning
+# as `DEFAULT_ROUTE` above, and asked as a single `noul` so the answer is one
+# probability rather than a schema the caller has to design per call.
+RELEVANCE_QUESTIONS: dict[str, Any] = {
+    "relevant": {
+        "type": "noul",
+        "instructions": "Given the task, is this context relevant to it: needed to do it, or to understand it?",
+    }
+}
+RELEVANCE_ROUTE = "typed-decisions"
+
+
+def _relevance_state(task: str, context: str) -> str:
+    if not isinstance(task, str) or not task.strip():
+        raise ValueError("`task` must be a non-empty string")
+    if not isinstance(context, str) or not context.strip():
+        raise ValueError("`context` must be a non-empty string")
+    return f"Task: {task}\n\nCandidate context:\n{context}"
+
+
+def relevant_locally(task: str, context: str) -> dict[str, Any]:
+    state = _relevance_state(task, context)
+    result = predict_locally(state, RELEVANCE_QUESTIONS, RELEVANCE_ROUTE)
+    result["route_reason"] = "fixed for this tool"
+    return result
+
+
+def _call_logger() -> logging.Logger | None:
+    """The rotated JSONL logger for `_log_call`, built on first use.
+
+    `None` when `LAYA_CALL_LOG=0`, checked once at import (README.md "Call
+    logging"). `propagate = False` keeps these lines out of the plain-text
+    launchd logs (`StandardOutPath`/`StandardErrorPath`), which are for the
+    process's own stdout/stderr, not structured records.
+    """
+    global _call_logger_singleton
+    if not CALL_LOG_ENABLED:
+        return None
+    if _call_logger_singleton is None:
+        with _call_log_lock:
+            if _call_logger_singleton is None:
+                os.makedirs(os.path.dirname(CALL_LOG_PATH), exist_ok=True)
+                handler = logging.handlers.RotatingFileHandler(
+                    CALL_LOG_PATH, maxBytes=CALL_LOG_MAX_BYTES, backupCount=CALL_LOG_BACKUPS
+                )
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                call_log = logging.getLogger("laya_mcp.calls")
+                call_log.setLevel(logging.INFO)
+                call_log.propagate = False
+                call_log.addHandler(handler)
+                _call_logger_singleton = call_log
+    return _call_logger_singleton
+
+
+def _sensitive_score(text: str) -> float:
+    """The `sensitive_data` `noul` probability for `text`, as one unchunked call.
+
+    Reuses `SCREEN_QUESTIONS["sensitive_data"]` and the same English-root
+    checkpoint `laya_screen` uses for it, but skips `laya_screen`'s chunking:
+    this is a quick heuristic for what to keep out of the log, not a
+    replacement for `laya_screen` when acting on untrusted content, so reading
+    only the first window of a long value is an accepted gap here.
+    """
+    with _inference_lock:
+        agent = _local_agent(SCREEN_ROUTE)
+        predicted = agent.predict(text, {"sensitive_data": SCREEN_QUESTIONS["sensitive_data"]})
+    return float(predicted["answers"]["sensitive_data"]["noul"])
+
+
+def _log_value(value: str, score: float) -> Any:
+    if score >= CALL_LOG_REDACT_THRESHOLD:
+        return {"redacted": True, "sensitive_data_noul": round(score, 4), "chars": len(value)}
+    return value
+
+
+# Which of a tool's arguments hold free text worth screening before logging.
+# `laya_health` takes none; `laya_classify`'s `items` is handled separately below
+# because it is a list, not a single string.
+_LOGGED_TEXT_ARGS: dict[str, tuple[str, ...]] = {
+    "laya_ask": ("state",),
+    "laya_screen": ("text",),
+    "laya_relevant": ("task", "context"),
+}
+
+
+def _logged_arguments(tool: str, arguments: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """`arguments`, with any free-text field replaced when it looks sensitive."""
+    out = dict(arguments)
+    if tool == "laya_screen":
+        # `laya_screen` already scored this exact text for `sensitive_data` as
+        # part of answering, so that answer is reused instead of a second pass.
+        out["text"] = _log_value(out["text"], result["answers"]["sensitive_data"]["noul"])
+        return out
+    if tool == "laya_classify":
+        texts = [entry["text"] if isinstance(entry, dict) else entry for entry in out.get("items") or []]
+        joined = "\n".join(str(t) for t in texts)[:4000]
+        if joined.strip():
+            score = _sensitive_score(joined)
+            if score >= CALL_LOG_REDACT_THRESHOLD:
+                out["items"] = {"redacted": True, "sensitive_data_noul": round(score, 4), "count": len(texts)}
+        return out
+    for key in _LOGGED_TEXT_ARGS.get(tool, ()):
+        value = out.get(key)
+        if isinstance(value, str) and value:
+            out[key] = _log_value(value, _sensitive_score(value))
+    return out
+
+
+def _log_call(tool: str, arguments: dict[str, Any], result: dict[str, Any], elapsed_ms: float) -> None:
+    """Append one JSONL record of a completed call. Never raises: a logging bug
+    must not fail the call it is describing."""
+    call_log = _call_logger()
+    if call_log is None:
+        return
+    try:
+        truncation = result.get("truncation") or {}
+        record: dict[str, Any] = {
+            "ts": round(time.time(), 3),
+            "tool": tool,
+            "arguments": _logged_arguments(tool, arguments, result),
+            "checkpoint": result.get("checkpoint"),
+            "route": result.get("route"),
+            "route_reason": result.get("route_reason"),
+            "served_by": result.get("served_by"),
+            "truncated": truncation.get("truncated", False),
+            "prefix_truncated": truncation.get("prefix_truncated", False),
+            "elapsed_ms": round(elapsed_ms, 1),
+        }
+        if tool == "laya_classify":
+            # Per-item answers can run to hundreds of rows; the count and how
+            # many were cut is enough signal here without inflating the log.
+            record["items_count"] = len(result.get("items") or [])
+            record["truncated_items"] = len(truncation.get("truncated_items") or [])
+        else:
+            record["answers"] = result.get("answers")
+        call_log.info(json.dumps(record, default=str, ensure_ascii=False))
+    except Exception:
+        logger.exception("call logging failed for %s", tool)
+
+
 # Tool name -> (arguments, response keys, local implementation). The daemon's
 # `/predict` dispatches on it, and `/health` and `laya_health` list it, so a client
 # holding a stale cached tool list can see what the server actually offers.
@@ -819,6 +980,14 @@ TOOL_SURFACE: dict[str, dict[str, Any]] = {
             "status", "default_route", "routes", "runtime", "tools", "round_trip_ms", "served_by",
         ],
         "local": health_locally,
+    },
+    "laya_relevant": {
+        "arguments": ["task", "context"],
+        "response_keys": [
+            "answers", "usage", "checkpoint", "limits", "route", "route_reason", "served_by",
+            "truncation",
+        ],
+        "local": relevant_locally,
     },
 }
 
@@ -875,8 +1044,10 @@ def _dispatch(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
             )
     else:
         result = {**run_tool_locally(tool, arguments), "served_by": "local"}
+    elapsed_ms = (time.perf_counter() - started) * 1000
     if tool == "laya_health":
-        result["round_trip_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        result["round_trip_ms"] = round(elapsed_ms, 1)
+    _log_call(tool, arguments, result, elapsed_ms)
     return result
 
 
@@ -973,7 +1144,15 @@ def laya_ask(
     A malformed spec raises an error; a missing `criteria` on `choice` or `score`
     is the usual cause.
     """
-    return _predict(state, questions, checkpoint)
+    started = time.perf_counter()
+    result = _predict(state, questions, checkpoint)
+    _log_call(
+        "laya_ask",
+        {"state": state, "questions": questions, "checkpoint": checkpoint},
+        result,
+        (time.perf_counter() - started) * 1000,
+    )
+    return result
 
 
 @app.tool
@@ -1094,3 +1273,53 @@ def laya_classify(
     return _dispatch(
         "laya_classify", {"items": items, "questions": questions, "checkpoint": checkpoint}
     )
+
+
+@app.tool
+def laya_relevant(
+    task: Annotated[
+        str,
+        Field(
+            description=(
+                "What you are trying to do: the task, goal, or the brief you are "
+                "about to hand a subagent."
+            )
+        ),
+    ],
+    context: Annotated[
+        str,
+        Field(
+            description=(
+                "One candidate piece of context to test against `task` — a file "
+                "excerpt, a memory fact, a search result, a paragraph of a brief. "
+                "Call once per candidate; for many candidates against the same "
+                "task use `laya_classify` with the same question instead."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Ask whether one piece of context is relevant to a task, before keeping it.
+
+    A thin `laya_ask` wrapper, fixed to one `noul` question and the
+    `typed-decisions` checkpoint: this is a judgment about the agent's own task
+    state, not about the content of `context` (`base` would be the choice for
+    that). It costs one inference call, same as any other Laya question — cheap
+    enough to run per candidate while refining a task or trimming a brief.
+
+    Use it while narrowing down a task — is this file, memory fact, or search
+    result actually needed, or can it be dropped — or right before launching a
+    subagent, to cut its brief down to what the task needs instead of
+    forwarding everything gathered so far.
+
+    Example: task "Fix the off-by-one in the pagination cursor", context "This
+    module also defines the CSV export helper, unrelated to pagination." ->
+    a low `noul`, e.g. 0.04. The same task with context "The cursor is computed
+    as `offset + limit` without clamping to `total`" -> a high `noul`.
+
+    Returns `answers.relevant`: `noul` is the probability `context` is
+    relevant to `task`. Read `noul` directly, not `confidence` — a near-0.5
+    answer is undecided, not "keep it anyway" (see `laya_ask`'s "Reading the
+    answer"). Also reports `truncation` if `context` was long enough to be cut,
+    and the usual `checkpoint`/`limits`/`served_by` provenance.
+    """
+    return _dispatch("laya_relevant", {"task": task, "context": context})

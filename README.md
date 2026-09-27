@@ -68,8 +68,9 @@ The daemon holds both resident and `laya_ask` takes an optional `checkpoint`: `b
 | `laya_classify` | one schema over up to 256 texts, batched | `tmp/tasks/notes/T10-classify-batching.md` |
 | `laya_screen` | untrusted text, chunked so nothing is truncated, on the `english` route | `tmp/tasks/notes/T9-screen-calibration.md` |
 | `laya_health` | loaded checkpoints, snapshots, budgets, and a timed probe | `tmp/tasks/notes/T8-health-tool-verification.log` |
+| `laya_relevant` | one candidate piece of context against one task, fixed `noul` on `typed-decisions` | `laya-mcp/src/laya_mcp/server.py` `RELEVANCE_QUESTIONS` |
 
-When a new tool is justified is set in `tmp/tasks/notes/T7-tool-surface.md`. Every tool besides `laya_ask` reaches the daemon over the existing `/predict` route as `{"tool", "arguments"}`, so a stdio client gets all four on the warm models.
+When a new tool is justified is set in `tmp/tasks/notes/T7-tool-surface.md`. Every tool besides `laya_ask` reaches the daemon over the existing `/predict` route as `{"tool", "arguments"}`, so a stdio client gets all five on the warm models.
 
 Env vars, with their code defaults (`laya-mcp/src/laya_mcp/server.py`, `laya-mcp/src/laya_mcp/daemon.py`):
 
@@ -85,8 +86,21 @@ Env vars, with their code defaults (`laya-mcp/src/laya_mcp/server.py`, `laya-mcp
 | `LAYA_MCP_PORT` | `8765` | bind port for the HTTP listener |
 | `LAYA_MCP_TLS_CERT` | unset | PEM certificate; with `LAYA_MCP_TLS_KEY`, serves HTTPS instead of HTTP |
 | `LAYA_MCP_TLS_KEY` | unset | PEM private key; must be set together with `LAYA_MCP_TLS_CERT` |
+| `LAYA_CALL_LOG` | `1` | `0` disables per-call JSONL logging entirely |
+| `LAYA_CALL_LOG_PATH` | `~/Library/Logs/laya-mcp/calls.jsonl` | where the rotated call log is written |
+| `LAYA_CALL_LOG_MAX_BYTES` | `10485760` (10 MiB) | size of one call-log file before it rotates |
+| `LAYA_CALL_LOG_BACKUPS` | `2` | rotated call-log files kept, beyond the active one |
+| `LAYA_CALL_LOG_REDACT_THRESHOLD` | `0.5` | `sensitive_data` `noul` at/above which a logged text argument is redacted |
 
 For LAN IP, port choice, bind address, and firewall posture, see `.agent/docs/dev-workflows.md` — this file always uses the loopback defaults above.
+
+### Call logging
+
+Every completed tool call is appended as one JSON line to `~/Library/Logs/laya-mcp/calls.jsonl` (`laya_mcp.server._log_call`): timestamp, tool, arguments, checkpoint/route/served_by, truncation flags, timing, and the answer (`laya_classify` logs its item count and truncated-item count instead of every per-item answer, to keep one large batch call from dominating the file). This server is single-user and local-only, so the tradeoff being managed is disk growth and secrets sitting at rest, not a second party reading it.
+
+- Rotated: `RotatingFileHandler`, 3 files of 10 MiB by default (`LAYA_CALL_LOG_MAX_BYTES`, `LAYA_CALL_LOG_BACKUPS`) — a logged call runs 1-3 KB, so that ceiling holds low thousands of calls of history before the oldest file rotates out.
+- Redacted, not skipped: before a free-text argument (`laya_ask`'s `state`, `laya_screen`'s `text`, `laya_relevant`'s `task`/`context`, the joined text of `laya_classify`'s `items`) is written, it is scored with the same `sensitive_data` question `laya_screen` asks (one unchunked call on the English route — `laya_screen` reuses its own answer instead of paying for a second one). At or above `LAYA_CALL_LOG_REDACT_THRESHOLD` (default `0.5`) the value is replaced by `{"redacted": true, "sensitive_data_noul": <score>, "chars": <len>}`; everything else in the record (checkpoint, timing, the answer, `questions`/`criteria`) is kept, because those aren't where a secret would be. This is a heuristic, not a security boundary — same caveat as `laya_screen` itself.
+- `LAYA_CALL_LOG=0` disables logging entirely; `LAYA_CALL_LOG_PATH` moves the file.
 
 ### TLS
 
@@ -153,7 +167,7 @@ stopped (`launchctl bootout gui/$(id -u)/com.ld-mcp.laya-mcp-http`).
 
 ## Restarting and warming
 
-`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then sends one `laya_ask` call per question type (`choice`, `score`, `noul`) plus one batched call of all three on each route, then one `laya_screen`, one `laya_classify` per route and one `laya_health`, so the first real call does not pay a Metal-kernel compile (see `skills/laya-mcp/SKILL.md`'s Traps, where each distinct schema shape pays its own one-time compile).
+`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then sends one `laya_ask` call per question type (`choice`, `score`, `noul`) plus one batched call of all three on each route, then one `laya_screen`, one `laya_classify` per route, one `laya_relevant` and one `laya_health`, so the first real call does not pay a Metal-kernel compile (see `skills/laya-mcp/SKILL.md`'s Traps, where each distinct schema shape pays its own one-time compile).
 
 ```
 $ ./laya-mcp/scripts/restart-warm.sh

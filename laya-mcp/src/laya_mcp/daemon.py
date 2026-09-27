@@ -17,6 +17,7 @@ files, and plain HTTP otherwise. See README.md.
 from __future__ import annotations
 
 import os
+import time
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -26,6 +27,7 @@ from .server import (
     _default_route,
     _local_agent,
     _local_router,
+    _log_call,
     _routes,
     app,
     describe,
@@ -78,7 +80,9 @@ async def predict(request: Request) -> JSONResponse:
     `LAYA_DAEMON_URL` is set, so a stdio `laya-mcp` process can borrow this
     daemon's warm model instead of loading a second copy. Clients that cannot
     use an MCP URL at all — Claude Desktop, which only spawns local stdio
-    servers — reach the warm model this way.
+    servers — reach the warm model this way. A non-MCP caller (a Playwright
+    test, `skills/laya-mcp/SKILL.md` "Alongside Playwright") reaches it too, so
+    both branches log through `_log_call`, same as the `@app.tool` wrappers.
     """
     if not _ready:
         return JSONResponse({"error": "agent still loading"}, status_code=503)
@@ -86,17 +90,20 @@ async def predict(request: Request) -> JSONResponse:
         payload = await request.json()
     except ValueError as exc:
         return JSONResponse({"error": f"body is not JSON: {exc}"}, status_code=400)
+    started = time.perf_counter()
     if isinstance(payload, dict) and "tool" in payload:
         # Every tool besides `laya_ask` travels this way, so a stdio process
         # reaches all of them on the warm models without a route per tool. A
         # model failure is not caught here: it must surface as a 500, never as an
         # answer (`laya_screen` fails closed on it).
+        tool = str(payload["tool"])
+        arguments = dict(payload.get("arguments") or {})
         try:
-            return JSONResponse(
-                run_tool_locally(str(payload["tool"]), dict(payload.get("arguments") or {}))
-            )
+            result = run_tool_locally(tool, arguments)
         except (TypeError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+        _log_call(tool, arguments, result, (time.perf_counter() - started) * 1000)
+        return JSONResponse(result)
     try:
         state = payload["text"]
         questions = payload["schema"]
@@ -104,9 +111,14 @@ async def predict(request: Request) -> JSONResponse:
     except (KeyError, TypeError, ValueError) as exc:
         return JSONResponse({"error": f"expected {{text, schema}}: {exc}"}, status_code=400)
     try:
-        return JSONResponse(predict_locally(state, questions, checkpoint))
+        result = predict_locally(state, questions, checkpoint)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    _log_call(
+        "laya_ask", {"state": state, "questions": questions, "checkpoint": checkpoint},
+        result, (time.perf_counter() - started) * 1000,
+    )
+    return JSONResponse(result)
 
 
 def _tls_config() -> dict[str, str]:
