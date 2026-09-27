@@ -809,29 +809,15 @@ def screen_locally(text: str) -> dict[str, Any]:
 
 # A judgment about the agent's own task state (is X needed for Y), not about
 # the content of `context` — so it is fixed to `typed-decisions`, same reasoning
-# as `DEFAULT_ROUTE` above. Asked as a neutral-key `choice`, not `noul`: live
-# call logs (calls.jsonl, 2026-09-27) showed 63% of laya_relevant calls (112/178)
-# under 0.6 confidence with this exact wording as `noul` — the same label-token
-# bias behind NandhaKishorM/laya#156 and the PerryLink fix already on record
-# (sources.md: rewriting a `noul` as a two-option `choice` moved 40 items from
-# 0.500 to 1.000 accuracy). Converted back to the `noul` answer shape below via
-# `_as_noul`, so the answer is still one probability and the tool's return
-# contract does not change.
+# as `DEFAULT_ROUTE` above, and asked as a single `noul` so the answer is one
+# probability rather than a schema the caller has to design per call.
 RELEVANCE_QUESTIONS: dict[str, Any] = {
     "relevant": {
-        "type": "choice",
+        "type": "noul",
         "instructions": "Given the task, is this context relevant to it: needed to do it, or to understand it?",
-        # Slot order matches SCREEN_QUESTIONS["injection"]: neutral keys, not
-        # "relevant"/"irrelevant" labels, so the checkpoint reads the description
-        # text rather than a memorized label token.
-        "criteria": {
-            "A": "relevant: needed to do the task, or to understand it",
-            "B": "irrelevant: not needed to do the task, or to understand it",
-        },
     }
 }
 RELEVANCE_ROUTE = "typed-decisions"
-RELEVANCE_YES_KEY = "A"
 
 
 def _relevance_state(task: str, context: str) -> str:
@@ -845,7 +831,6 @@ def _relevance_state(task: str, context: str) -> str:
 def relevant_locally(task: str, context: str) -> dict[str, Any]:
     state = _relevance_state(task, context)
     result = predict_locally(state, RELEVANCE_QUESTIONS, RELEVANCE_ROUTE)
-    result["answers"]["relevant"] = _as_noul(result["answers"]["relevant"], RELEVANCE_YES_KEY)
     result["route_reason"] = "fixed for this tool"
     return result
 
