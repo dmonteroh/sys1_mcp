@@ -188,6 +188,10 @@ for route in $ROUTES; do
 done
 # laya_relevant is always the typed-decisions route, regardless of $ROUTES.
 warm_tool 'relevant' laya_relevant '{"task":"Fix the off-by-one in the pagination cursor","context":"This module also defines the CSV export helper, unrelated to pagination."}' answers || status=1
+warm_tool 'select tests' laya_select_tests '{"diff_chunks":["Changed pagination cursor calculation"],"tests":[{"id":"pagination","path":"tests/pagination.spec.ts","title":"opens page two"}],"changed_files":[]}' mode || status=1
+warm_tool 'verify outcome' laya_verify_outcome '{"goal":"A report exists","tool_result":"The report job completed","evidence":"The report file is present","checks":[{"name":"file exists","passed":true}]}' status || status=1
+warm_tool 'cache fit' laya_cache_fit '{"new_request":"Show April totals","cached_request":"Show April totals","cached_answer":"April total is 12","new_scope":{"tenant":"demo","month":"April"},"cached_scope":{"tenant":"demo","month":"April"},"expires_at":"2099-01-01T00:00:00Z"}' action || status=1
+warm_tool 'pack context' laya_pack_context '{"task":"Fix pagination","candidates":[{"id":"constraint","text":"Keep the public API stable","tokens":6},{"id":"trace","text":"Page two starts at the wrong cursor","tokens":7}],"pinned_ids":["constraint"],"budget_tokens":20}' selected_ids || status=1
 warm_tool 'health' laya_health '{}' probe_ms || status=1
 
 if [ "$status" -ne 0 ]; then

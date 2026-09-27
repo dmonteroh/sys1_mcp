@@ -61,6 +61,8 @@ test('records whether the alert explains the email problem', async ({ page }) =>
 
 This example records a judgment through [Playwright's runtime annotations](https://playwright.dev/docs/test-annotations). It does not turn the score into a pass. Use test data that may appear in reports and the daemon's call log ([README.md](../../../README.md), Call logging). The existing skill has no threshold fitted to browser assertions, and `noul` can misread some yes/no wording. Compare the answer with known pass, fail, and near-miss cases before choosing a pass threshold. Keep `checkpoint` and the exact question fixed once calibrated. A score between accepted pass and fail bands is inconclusive, not success.
 
+For change-aware selection of which Playwright tests to run, call `laya_select_tests` with the discovered test IDs and diff chunks before starting Playwright. It defaults to a full-suite run while recording relevance scores. Its contract and threshold evaluation are in [agent-workflows.md](agent-workflows.md); semantic assertions inside a running test still use the `/predict` pattern above.
+
 ## Let Laya choose a control
 
 Build candidates from the current Playwright page or a scoped region. Give each candidate an ID stable within the observation, role, accessible name, and current state. Put the test step and that candidate table in `text`. Ask one `choice` question with candidate IDs and `none` as the criteria. Keep at most ten labels including `none`, because this Laya deployment sharpens distributions at eleven ([server.py](../../../laya-mcp/src/laya_mcp/server.py), `_add_margins`). Narrow a crowded page by region or element type before asking. Never silently omit a plausible control.

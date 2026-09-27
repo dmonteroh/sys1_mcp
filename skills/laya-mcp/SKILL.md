@@ -1,13 +1,13 @@
 ---
 name: laya-mcp
-description: "Use local Laya MCP tools for closed questions about text: choice, score, yes/no, batch classification, untrusted-content screening, and task-context relevance. Read the E2E reference when using Laya with Playwright or semantic test assertions."
+description: "Use local Laya MCP tools for closed text decisions, untrusted-content screening, task relevance, and agent workflows such as test selection, outcome checks, cache reuse, and context packing."
 metadata:
   category: ai
 ---
 
 # Laya decisions over MCP
 
-System One models make fast, structured decisions that software can use directly. Give one a state and a typed question, and it returns a typed answer and probability, not prose (TypeSafe AI, "System One" docs, docs.typesafe.ai/concepts/system-one). Laya, from Convai Innovations, is an open-weight model in that class. It is a non-autoregressive classifier that runs a single forward pass in tens of milliseconds and generates no text (laya.convaiinnovations.com, huggingface.co/convaiinnovations/laya). Three checkpoints ship: a 421M ModernBERT-large English root, a 322M mmBERT-base multilingual variant, and 421M `laya-typed-decisions`, tuned for agent traces, customer service, invoices, and security incidents. They answer the same questions differently. This skill covers the available MCP tools: `laya_ask` for a closed question about one text, `laya_classify` for one schema over many texts, `laya_screen` for untrusted content, `laya_relevant` for task-context fit, and `laya_health` for the serving weights.
+System One models make fast, structured decisions that software can use directly. Give one a state and a typed question, and it returns a typed answer and probability, not prose (TypeSafe AI, "System One" docs, docs.typesafe.ai/concepts/system-one). Laya, from Convai Innovations, is an open-weight model in that class. It is a non-autoregressive classifier that runs a single forward pass in tens of milliseconds and generates no text (laya.convaiinnovations.com, huggingface.co/convaiinnovations/laya). Three checkpoints ship: a 421M ModernBERT-large English root, a 322M mmBERT-base multilingual variant, and 421M `laya-typed-decisions`, tuned for agent traces, customer service, invoices, and security incidents. They answer the same questions differently. The MCP exposes general text decisions, specialized screening and relevance, and four agent workflows built from those decisions.
 
 Reach for it instead of a second LLM call whose only job is to pick a label, grade a level, or answer yes/no about text already in hand.
 
@@ -38,7 +38,13 @@ Reach for it instead of a second LLM call whose only job is to pick a label, gra
 | a list of texts — files, log lines, search hits, tickets, commits — and one schema | `laya_classify(items, questions, checkpoint?)` | One call instead of one per item: up to 256 items, answers in input order, per-item `truncated`. The saving is agent turns, not GPU time — 256 items × 3 questions take about 6 s. |
 | a fetched page, third-party file, or tool output you are about to act on | `laya_screen(text)` | Chunks the whole text so nothing late is missed, and returns the worst chunk per question. See **Screening untrusted text**. |
 | a task and one candidate piece of context, deciding whether to keep it | `laya_relevant(task, context)` | One fixed `noul` question on `laya-typed-decisions`, no schema to design. For many candidates, use `laya_classify` and include the task in each item's text. |
+| a code change and discovered browser tests | `laya_select_tests(diff_chunks, tests, changed_files?, threshold?)` | Rank likely affected tests; run the full suite unless you supply a threshold validated on your own test history. |
+| a tool claim and independent evidence for a requested outcome | `laya_verify_outcome(goal, tool_result, evidence, checks?)` | Separate exact check failures from a provisional semantic judgment. |
+| a new request and a cached answer | `laya_cache_fit(new_request, cached_request, cached_answer, new_scope, cached_scope, expires_at, reuse_threshold?)` | Compare exact scope and expiry before semantic fit; reuse needs a calibrated threshold. |
+| a task brief with a hard context budget | `laya_pack_context(task, candidates, pinned_ids, budget_tokens, novelty_threshold?)` | Preserve pinned obligations and source IDs while ranking the rest. |
 | doubt about which weights answer, or answers that look off | `laya_health()` | Names every loaded checkpoint with its revision and budget, and times a real inference now. |
+
+The four agent workflows use fixed questions on `typed-decisions`. Read [references/agent-workflows.md](references/agent-workflows.md) for their input shapes, fallback states, and calibration procedure. `laya_screen` remains the tool for instructions in untrusted content; it does not decide whether a cached answer, test, or completed task fits the user's goal.
 
 ## The tool contract
 

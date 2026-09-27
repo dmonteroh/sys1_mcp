@@ -1,11 +1,10 @@
 """Shared MCP app for laya-mcp.
 
-Defines one `FastMCP` instance and its tools: `laya_ask`, the generic escape
-hatch, plus `laya_health`, `laya_screen`, `laya_classify` and `laya_relevant`,
-which each fix a schema or a capability the generic tool cannot express
-(`tmp/tasks/notes/T7-tool-surface.md`). This module holds no transport choice of
-its own: `laya_mcp.__init__` runs it over stdio and `laya_mcp.daemon` over
-`streamable-http`.
+Defines one `FastMCP` instance with general decisions, specialized screening
+and relevance, and bounded workflows for test selection, outcome evidence,
+cache fit, and context packing. The original tool-surface design is in
+`tmp/tasks/notes/T7-tool-surface.md`. This module holds no transport choice:
+`laya_mcp.__init__` runs it over stdio and `laya_mcp.daemon` over HTTP.
 """
 
 from __future__ import annotations
@@ -24,6 +23,8 @@ from typing import Annotated, Any
 import httpx
 from fastmcp import FastMCP
 from pydantic import Field
+
+from . import workflows
 
 logger = logging.getLogger("laya_mcp")
 
@@ -834,6 +835,47 @@ def relevant_locally(task: str, context: str) -> dict[str, Any]:
     return result
 
 
+def select_tests_locally(
+    diff_chunks: list[str], tests: list[dict[str, Any]],
+    changed_files: list[str] | None = None, threshold: float | None = None,
+) -> dict[str, Any]:
+    return workflows.select_tests(
+        diff_chunks, tests, [] if changed_files is None else changed_files,
+        threshold, classify_locally,
+    )
+
+
+def verify_outcome_locally(
+    goal: str, tool_result: str, evidence: str,
+    checks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return workflows.verify_outcome(
+        goal, tool_result, evidence, [] if checks is None else checks,
+        predict_locally,
+    )
+
+
+def cache_fit_locally(
+    new_request: str, cached_request: str, cached_answer: str,
+    new_scope: dict[str, Any], cached_scope: dict[str, Any], expires_at: str,
+    reuse_threshold: float | None = None,
+) -> dict[str, Any]:
+    return workflows.cache_fit(
+        new_request, cached_request, cached_answer, new_scope, cached_scope,
+        expires_at, reuse_threshold, predict_locally,
+    )
+
+
+def pack_context_locally(
+    task: str, candidates: list[dict[str, Any]], pinned_ids: list[str],
+    budget_tokens: int, novelty_threshold: float | None = None,
+) -> dict[str, Any]:
+    return workflows.pack_context(
+        task, candidates, pinned_ids, budget_tokens, novelty_threshold,
+        classify_locally, predict_locally,
+    )
+
+
 def _call_logger() -> logging.Logger | None:
     """The rotated JSONL logger for `_log_call`, built on first use.
 
@@ -895,6 +937,37 @@ _LOGGED_TEXT_ARGS: dict[str, tuple[str, ...]] = {
 def _logged_arguments(tool: str, arguments: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """`arguments`, with any free-text field replaced when it looks sensitive."""
     out = dict(arguments)
+    if tool == "laya_select_tests":
+        return {
+            "diff_chunks_count": len(out.get("diff_chunks") or []),
+            "tests_count": len(out.get("tests") or []),
+            "changed_files_count": len(out.get("changed_files") or []),
+            "threshold": out.get("threshold"),
+        }
+    if tool == "laya_verify_outcome":
+        return {
+            "goal_chars": len(out.get("goal") or ""),
+            "tool_result_chars": len(out.get("tool_result") or ""),
+            "evidence_chars": len(out.get("evidence") or ""),
+            "checks_count": len(out.get("checks") or []),
+        }
+    if tool == "laya_cache_fit":
+        return {
+            "new_request_chars": len(out.get("new_request") or ""),
+            "cached_request_chars": len(out.get("cached_request") or ""),
+            "cached_answer_chars": len(out.get("cached_answer") or ""),
+            "new_scope_fields": len(out.get("new_scope") or {}),
+            "cached_scope_fields": len(out.get("cached_scope") or {}),
+            "reuse_threshold": out.get("reuse_threshold"),
+        }
+    if tool == "laya_pack_context":
+        return {
+            "task_chars": len(out.get("task") or ""),
+            "candidates_count": len(out.get("candidates") or []),
+            "pinned_count": len(out.get("pinned_ids") or []),
+            "budget_tokens": out.get("budget_tokens"),
+            "novelty_threshold": out.get("novelty_threshold"),
+        }
     if tool == "laya_screen":
         # `laya_screen` already scored this exact text for `sensitive_data` as
         # part of answering, so that answer is reused instead of a second pass.
@@ -935,7 +1008,12 @@ def _log_call(tool: str, arguments: dict[str, Any], result: dict[str, Any], elap
             "prefix_truncated": truncation.get("prefix_truncated", False),
             "elapsed_ms": round(elapsed_ms, 1),
         }
-        if tool == "laya_classify":
+        if tool in {"laya_select_tests", "laya_verify_outcome", "laya_cache_fit", "laya_pack_context"}:
+            record["workflow_result"] = {
+                key: result[key] for key in ("mode", "status", "action", "reason", "used_tokens")
+                if key in result
+            }
+        elif tool == "laya_classify":
             # Per-item answers can run to hundreds of rows; the count and how
             # many were cut is enough signal here without inflating the log.
             record["items_count"] = len(result.get("items") or [])
@@ -988,6 +1066,26 @@ TOOL_SURFACE: dict[str, dict[str, Any]] = {
             "truncation",
         ],
         "local": relevant_locally,
+    },
+    "laya_select_tests": {
+        "arguments": ["diff_chunks", "tests", "changed_files", "threshold"],
+        "response_keys": ["mode", "reason", "run_ids", "scores", "ranked_ids", "checkpoint", "route", "served_by"],
+        "local": select_tests_locally,
+    },
+    "laya_verify_outcome": {
+        "arguments": ["goal", "tool_result", "evidence", "checks"],
+        "response_keys": ["status", "suggested", "probabilities", "checkpoint", "route", "served_by"],
+        "local": verify_outcome_locally,
+    },
+    "laya_cache_fit": {
+        "arguments": ["new_request", "cached_request", "cached_answer", "new_scope", "cached_scope", "expires_at", "reuse_threshold"],
+        "response_keys": ["action", "reason", "model_called", "fit_probabilities", "checkpoint", "route", "served_by"],
+        "local": cache_fit_locally,
+    },
+    "laya_pack_context": {
+        "arguments": ["task", "candidates", "pinned_ids", "budget_tokens", "novelty_threshold"],
+        "response_keys": ["selected", "selected_ids", "pinned_ids", "skipped", "scores", "used_tokens", "budget_tokens", "checkpoint", "route", "served_by"],
+        "local": pack_context_locally,
     },
 }
 
@@ -1323,3 +1421,86 @@ def laya_relevant(
     and the usual `checkpoint`/`limits`/`served_by` provenance.
     """
     return _dispatch("laya_relevant", {"task": task, "context": context})
+
+
+@app.tool
+def laya_select_tests(
+    diff_chunks: list[str],
+    tests: list[dict[str, Any]],
+    changed_files: list[str] | None = None,
+    threshold: float | None = None,
+) -> dict[str, Any]:
+    """Rank Playwright tests against code changes, with a full-suite fallback.
+
+    Supply discovered tests as {id, path, title, description?}, bounded diff
+    chunks, and changed paths. Directly changed specs always run. Without a
+    threshold this is observation mode and returns every test in `run_ids`.
+    Supply a threshold only after measuring recall on your own changes. Model
+    failure, truncation, oversized input, or an empty selection runs all tests.
+    This tool selects IDs; the caller remains responsible for running Playwright.
+    """
+    return _dispatch("laya_select_tests", {
+        "diff_chunks": diff_chunks, "tests": tests,
+        "changed_files": changed_files, "threshold": threshold,
+    })
+
+
+@app.tool
+def laya_verify_outcome(
+    goal: str, tool_result: str, evidence: str,
+    checks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compare an agent's claimed result with independent outcome evidence.
+
+    `checks` contains exact {name, passed} checks; any failed check contradicts
+    completion without asking Laya. Missing evidence requests more evidence.
+    Otherwise the typed-decisions model ranks supported, pending, contradicted,
+    and unknown. A supported label is an observation, not proof of completion.
+    """
+    return _dispatch("laya_verify_outcome", {
+        "goal": goal, "tool_result": tool_result, "evidence": evidence, "checks": checks,
+    })
+
+
+@app.tool
+def laya_cache_fit(
+    new_request: str, cached_request: str, cached_answer: str,
+    new_scope: dict[str, Any], cached_scope: dict[str, Any], expires_at: str,
+    reuse_threshold: float | None = None,
+) -> dict[str, Any]:
+    """Check whether a cached answer still fits a new request.
+
+    Exact scope dictionaries must match and `expires_at` must be a future ISO
+    timestamp with timezone. A mismatch or expiry recomputes without Laya.
+    Semantic reuse requires a caller-calibrated `reuse_threshold`; without one
+    the model score is observational and `action` is `recompute`. Truncated or
+    failed predictions also recompute. Keep tenant, filters, and cache keys in
+    the exact scopes rather than asking the model to enforce isolation.
+    """
+    return _dispatch("laya_cache_fit", {
+        "new_request": new_request, "cached_request": cached_request,
+        "cached_answer": cached_answer, "new_scope": new_scope,
+        "cached_scope": cached_scope, "expires_at": expires_at,
+        "reuse_threshold": reuse_threshold,
+    })
+
+
+@app.tool
+def laya_pack_context(
+    task: str, candidates: list[dict[str, Any]], pinned_ids: list[str],
+    budget_tokens: int, novelty_threshold: float | None = None,
+) -> dict[str, Any]:
+    """Pack task context while preserving caller-pinned obligations.
+
+    Supply 1-32 candidates as {id, text, tokens}; `tokens` must come from the
+    target agent's tokenizer. Pin every user constraint, prohibition, unresolved
+    failure, and required source by ID. The tool rejects a budget smaller than
+    the pinned total, ranks the rest for relevance, and tests novelty against
+    retained context. Exact duplicates are removed. A caller-calibrated
+    `novelty_threshold` may filter more; by default novelty is reported only.
+    The returned `selected` entries retain their source IDs and text.
+    """
+    return _dispatch("laya_pack_context", {
+        "task": task, "candidates": candidates, "pinned_ids": pinned_ids,
+        "budget_tokens": budget_tokens, "novelty_threshold": novelty_threshold,
+    })

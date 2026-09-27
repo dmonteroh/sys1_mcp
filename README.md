@@ -69,8 +69,12 @@ The daemon holds both resident and `laya_ask` takes an optional `checkpoint`: `b
 | `laya_screen` | untrusted text, chunked so nothing is truncated, on the `english` route | `tmp/tasks/notes/T9-screen-calibration.md` |
 | `laya_health` | loaded checkpoints, snapshots, budgets, and a timed probe | `tmp/tasks/notes/T8-health-tool-verification.log` |
 | `laya_relevant` | one candidate piece of context against one task, fixed `noul` on `typed-decisions` | `laya-mcp/src/laya_mcp/server.py` `RELEVANCE_QUESTIONS` |
+| `laya_select_tests` | rank discovered Playwright tests against diff chunks; full-suite fallback | `laya-mcp/src/laya_mcp/workflows.py` `select_tests` |
+| `laya_verify_outcome` | compare a claimed result with independent evidence and exact checks | `laya-mcp/src/laya_mcp/workflows.py` `verify_outcome` |
+| `laya_cache_fit` | check exact cache scope and expiry before semantic answer reuse | `laya-mcp/src/laya_mcp/workflows.py` `cache_fit` |
+| `laya_pack_context` | pin obligations, then fill a caller-counted context budget | `laya-mcp/src/laya_mcp/workflows.py` `pack_context` |
 
-When a new tool is justified is set in `tmp/tasks/notes/T7-tool-surface.md`. Every tool besides `laya_ask` reaches the daemon over the existing `/predict` route as `{"tool", "arguments"}`, so a stdio client gets all five on the warm models.
+The four workflow tools adapt the proposals in `temp/expansion/laya-agent-use-cases.md`; their input and fallback contracts are in `skills/laya-mcp/references/agent-workflows.md`. They add names to the existing tool surface. Every tool besides `laya_ask` reaches the daemon over the existing `/predict` route as `{"tool", "arguments"}`, so stdio clients reuse the warm models without a new endpoint.
 
 Env vars, with their code defaults (`laya-mcp/src/laya_mcp/server.py`, `laya-mcp/src/laya_mcp/daemon.py`):
 
@@ -101,6 +105,7 @@ Every completed tool call is appended as one JSON line to `~/Library/Logs/laya-m
 - Rotated: `RotatingFileHandler`, 3 files of 10 MiB by default (`LAYA_CALL_LOG_MAX_BYTES`, `LAYA_CALL_LOG_BACKUPS`) — a logged call runs 1-3 KB, so that ceiling holds low thousands of calls of history before the oldest file rotates out.
 - Redacted, not skipped: before a free-text argument (`laya_ask`'s `state`, `laya_screen`'s `text`, `laya_relevant`'s `task`/`context`, the joined text of `laya_classify`'s `items`) is written, it is scored with the same `sensitive_data` question `laya_screen` asks (one unchunked call on the English route — `laya_screen` reuses its own answer instead of paying for a second one). At or above `LAYA_CALL_LOG_REDACT_THRESHOLD` (default `0.5`) the value is replaced by `{"redacted": true, "sensitive_data_noul": <score>, "chars": <len>}`; everything else in the record (checkpoint, timing, the answer, `questions`/`criteria`) is kept, because those aren't where a secret would be. This is a heuristic, not a security boundary — same caveat as `laya_screen` itself.
 - `LAYA_CALL_LOG=0` disables logging entirely; `LAYA_CALL_LOG_PATH` moves the file.
+- The four workflow tools log input counts, lengths, budget, and high-level result only. Their free-text arguments and selected context never enter the call log.
 
 ### TLS
 
@@ -167,7 +172,7 @@ stopped (`launchctl bootout gui/$(id -u)/com.ld-mcp.laya-mcp-http`).
 
 ## Restarting and warming
 
-`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then sends one `laya_ask` call per question type (`choice`, `score`, `noul`) plus one batched call of all three on each route, then one `laya_screen`, one `laya_classify` per route, one `laya_relevant` and one `laya_health`, so the first real call does not pay a Metal-kernel compile (see `skills/laya-mcp/SKILL.md`'s Traps, where each distinct schema shape pays its own one-time compile).
+`laya-mcp/scripts/restart-warm.sh` restarts the LaunchAgent, waits for `/health` to return 200, then exercises every question type on each route and every specialized tool, including the four agent workflows. This warms their schema shapes before the first real call (see `skills/laya-mcp/SKILL.md`'s Common pitfalls).
 
 ```
 $ ./laya-mcp/scripts/restart-warm.sh
