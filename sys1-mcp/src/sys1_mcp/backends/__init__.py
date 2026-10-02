@@ -8,8 +8,9 @@ probabilities. That is the `POST /v1/systemone` shape of TypeSafe's Jev API
 A backend is one way of getting those answers. The tools never name a model
 family, only a backend's model names and the two roles below.
 
-Selected by `SYS1_BACKEND`: `laya-mlx` (default) runs Laya in this process;
-`systemone` posts to any `/v1/systemone`-shaped HTTP endpoint.
+Selected by `SYS1_BACKEND`: `systemone` (default) posts to any
+`/v1/systemone`-shaped HTTP endpoint named by `SYS1_ENDPOINT`. `laya-mlx` runs
+Laya in this process and needs the `[laya]` extra installed.
 """
 
 from __future__ import annotations
@@ -113,7 +114,7 @@ class Backend:
 
 
 def from_env() -> Backend:
-    kind = os.environ.get("SYS1_BACKEND", "laya-mlx")
+    kind = os.environ.get("SYS1_BACKEND", "systemone")
     if kind == "laya-mlx":
         from .laya_mlx import LayaMlxBackend
 

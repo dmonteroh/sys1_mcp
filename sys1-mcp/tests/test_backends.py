@@ -14,6 +14,9 @@ from unittest.mock import patch
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+# The server builds its backend at import. Tests never reach this endpoint:
+# they patch `BACKEND` or the HTTP client.
+os.environ.setdefault("SYS1_ENDPOINT", "http://127.0.0.1:9/v1/systemone")
 
 from sys1_mcp import server  # noqa: E402
 from sys1_mcp.backends import Backend  # noqa: E402

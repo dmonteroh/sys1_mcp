@@ -6,7 +6,7 @@
 	<string>com.sys1-mcp.http</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/USERNAME/.venvs/laya-mlx-t1/bin/sys1-mcp-http</string>
+		<string>/Users/USERNAME/.venvs/sys1-mcp/bin/sys1-mcp-http</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

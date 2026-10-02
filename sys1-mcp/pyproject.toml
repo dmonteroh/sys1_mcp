@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The default `laya-mlx` backend, which runs Laya in this process on Apple Silicon.
+# The optional `laya-mlx` backend, which runs Laya in this process on Apple Silicon.
 laya = ["laya-mlx>=0.1.0"]
 
 [project.scripts]
