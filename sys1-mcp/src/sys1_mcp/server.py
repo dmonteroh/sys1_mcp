@@ -11,16 +11,19 @@ module reaches only through `BACKEND`. The original tool-surface design is in
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import logging.handlers
 import os
+import queue
 import threading
 import time
 from typing import Annotated, Any
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_context
 from pydantic import Field
 
 from . import backends, workflows
@@ -57,6 +60,16 @@ CALL_LOG_BACKUPS = int(os.environ.get("SYS1_CALL_LOG_BACKUPS", 2))
 # Above this `sensitive_data` probability, a logged text argument is replaced by
 # its score and length rather than its content.
 CALL_LOG_REDACT_THRESHOLD = float(os.environ.get("SYS1_CALL_LOG_REDACT_THRESHOLD", 0.5))
+# Records waiting for redaction scoring; a chosen default, not measured. When
+# full, a record is written at once with its free text withheld unscored, so a
+# backlog never delays a call or puts unchecked text in the log.
+CALL_LOG_QUEUE_MAX = 1000
+
+# The four workflow tools had 2 real uses in the Laya-period log while their
+# descriptions were 26% of the tool list every client loads
+# (`.agent/docs/usage-findings.md` "Usage"), so they are served only on request.
+WORKFLOW_TOOLS = ("sys1_select_tests", "sys1_verify_outcome", "sys1_cache_fit", "sys1_pack_context")
+WORKFLOW_TOOLS_ENABLED = os.environ.get("SYS1_WORKFLOW_TOOLS", "0") in ("1", "true", "True")
 
 # Read once: every env var it needs is validated here, before any model load.
 BACKEND = backends.from_env()
@@ -65,6 +78,10 @@ app = FastMCP("sys1")
 
 _call_log_lock = threading.Lock()
 _call_logger_singleton: logging.Logger | None = None
+_log_queue: queue.Queue[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any]]] = queue.Queue(
+    maxsize=CALL_LOG_QUEUE_MAX
+)
+_log_worker_thread: threading.Thread | None = None
 
 
 def _add_margins(answers: dict[str, Any]) -> dict[str, Any]:
@@ -298,15 +315,43 @@ def screen_locally(text: str) -> dict[str, Any]:
 
 
 # A judgment about the agent's own task state (is X needed for Y), not about
-# the content of `context` — so it uses the `trace` role, and is asked as a
-# single `noul` so the answer is one probability rather than a schema the
-# caller has to design per call.
-RELEVANCE_QUESTIONS: dict[str, Any] = {
-    "relevant": {
-        "type": "noul",
-        "instructions": "Given the task, is this context relevant to it: needed to do it, or to understand it?",
-    }
+# the content of `context` — so it uses the `trace` role, and the answer is
+# always one `noul` probability rather than a schema the caller designs per call.
+# Two wordings, picked per backend because each was measured on one model
+# (`.agent/docs/usage-findings.md` "Relevance", 170 judge-labelled relevant pairs):
+# - `choice`, a neutral 2-option choice returned in the `noul` shape like
+#   `injection`: on Jev-Style it kept 152/170 relevant contexts at 0.5 against
+#   the `noul`'s 87, and clear negatives stayed at 0.04-0.25.
+# - `noul`, the original wording: Laya typed-decisions kept 137/170 with it, and
+#   the same choice rewrite was reverted on Laya on 2026-09-27.
+RELEVANCE_WORDINGS: dict[str, dict[str, Any]] = {
+    "choice": {
+        "relevant": {
+            "type": "choice",
+            "instructions": "How does this context relate to the task?",
+            "criteria": {
+                "A": "relevant: needed to do the task or to understand it",
+                "B": "not relevant: about something else, or adds nothing the task needs",
+            },
+        }
+    },
+    "noul": {
+        "relevant": {
+            "type": "noul",
+            "instructions": "Given the task, is this context relevant to it: needed to do it, or to understand it?",
+        }
+    },
 }
+RELEVANCE_WORDING = os.environ.get("SYS1_RELEVANCE_WORDING") or (
+    "noul" if BACKEND.name == "laya-mlx" else "choice"
+)
+if RELEVANCE_WORDING not in RELEVANCE_WORDINGS:
+    raise SystemExit(
+        f"SYS1_RELEVANCE_WORDING={RELEVANCE_WORDING!r}; choose one of {sorted(RELEVANCE_WORDINGS)}"
+    )
+RELEVANCE_QUESTIONS = RELEVANCE_WORDINGS[RELEVANCE_WORDING]
+# The neutral key meaning "relevant", when the wording is a choice.
+RELEVANCE_YES_KEY = "A"
 
 
 def _relevance_state(task: str, context: str) -> str:
@@ -318,7 +363,13 @@ def _relevance_state(task: str, context: str) -> str:
 
 
 def relevant_locally(task: str, context: str) -> dict[str, Any]:
-    return predict_locally(_relevance_state(task, context), RELEVANCE_QUESTIONS, role="trace")
+    result = predict_locally(_relevance_state(task, context), RELEVANCE_QUESTIONS, role="trace")
+    if RELEVANCE_QUESTIONS["relevant"]["type"] == "choice":
+        result["answers"]["relevant"] = _as_noul(result["answers"]["relevant"], RELEVANCE_YES_KEY)
+    # The exact question asked, so a caller batching candidates through
+    # `sys1_classify` asks the same one this backend was measured with.
+    result["question"] = RELEVANCE_QUESTIONS
+    return result
 
 
 def _trace_predict(state: str, questions: dict[str, Any]) -> dict[str, Any]:
@@ -412,26 +463,33 @@ def _call_logger() -> logging.Logger | None:
     return _call_logger_singleton
 
 
-def _sensitive_score(text: str) -> float:
-    """The `sensitive_data` `noul` probability for `text`, as one unchunked call.
+def _sensitive_scores(texts: list[str]) -> list[float]:
+    """The `sensitive_data` `noul` probability for each text, in one batched call.
 
     Reuses `SCREEN_QUESTIONS["sensitive_data"]` and the content-role model
     `sys1_screen` uses for it, but skips `sys1_screen`'s chunking: this is a
     quick heuristic for what to keep out of the log, not a replacement for
     `sys1_screen` when acting on untrusted content, so reading only the first
-    window of a long value is an accepted gap here. On a remote backend this is
-    one more request carrying the same text the call already sent.
+    window of a long value is an accepted gap here. On a remote backend this
+    sends the same text the call already sent.
     """
-    predicted = BACKEND.predict(
-        text, {"sensitive_data": SCREEN_QUESTIONS["sensitive_data"]}, BACKEND.role_model("content")
+    batch = BACKEND.predict_many(
+        texts, {"sensitive_data": SCREEN_QUESTIONS["sensitive_data"]}, BACKEND.role_model("content")
     )
-    return float(predicted["answers"]["sensitive_data"]["noul"])
+    return [float(answers["sensitive_data"]["noul"]) for answers in batch["answers"]]
 
 
-def _log_value(value: str, score: float) -> Any:
-    if score >= CALL_LOG_REDACT_THRESHOLD:
-        return {"redacted": True, "sensitive_data_noul": round(score, 4), "chars": len(value)}
-    return value
+def _redacted(value: Any, score: float | None, reason: str | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {"redacted": True}
+    if score is not None:
+        out["sensitive_data_noul"] = round(score, 4)
+    if reason is not None:
+        out["reason"] = reason
+    if isinstance(value, list):
+        out["count"] = len(value)
+    else:
+        out["chars"] = len(value)
+    return out
 
 
 # Which of a tool's arguments hold free text worth screening before logging.
@@ -444,8 +502,14 @@ _LOGGED_TEXT_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _logged_arguments(tool: str, arguments: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    """`arguments`, with any free-text field replaced when it looks sensitive."""
+def _logged_arguments(
+    tool: str, arguments: dict[str, Any], result: dict[str, Any], score: bool = True
+) -> dict[str, Any]:
+    """`arguments`, with any free-text field replaced when it looks sensitive.
+
+    With `score=False`, or when scoring fails, every free-text field is withheld
+    unscored: a record that could not be checked keeps its text out of the log.
+    """
     out = dict(arguments)
     if tool == "sys1_select_tests":
         return {
@@ -478,38 +542,126 @@ def _logged_arguments(tool: str, arguments: dict[str, Any], result: dict[str, An
             "budget_tokens": out.get("budget_tokens"),
             "novelty_threshold": out.get("novelty_threshold"),
         }
-    if tool == "sys1_screen":
+    if tool == "sys1_screen" and isinstance(out.get("text"), str):
         # `sys1_screen` already scored this exact text for `sensitive_data` as
         # part of answering, so that answer is reused instead of a second pass.
-        out["text"] = _log_value(out["text"], result["answers"]["sensitive_data"]["noul"])
+        p = result["answers"]["sensitive_data"]["noul"]
+        if p >= CALL_LOG_REDACT_THRESHOLD:
+            out["text"] = _redacted(out["text"], p)
         return out
+    fields: dict[str, str] = {}
     if tool == "sys1_classify":
         texts = [entry["text"] if isinstance(entry, dict) else entry for entry in out.get("items") or []]
         joined = "\n".join(str(t) for t in texts)[:4000]
         if joined.strip():
-            score = _sensitive_score(joined)
-            if score >= CALL_LOG_REDACT_THRESHOLD:
-                out["items"] = {"redacted": True, "sensitive_data_noul": round(score, 4), "count": len(texts)}
+            fields["items"] = joined
+    else:
+        for key in _LOGGED_TEXT_ARGS.get(tool, ()):
+            value = out.get(key)
+            if isinstance(value, str) and value:
+                fields[key] = value
+    if not fields:
         return out
-    for key in _LOGGED_TEXT_ARGS.get(tool, ()):
-        value = out.get(key)
-        if isinstance(value, str) and value:
-            out[key] = _log_value(value, _sensitive_score(value))
+    scores: list[float] | None = None
+    reason = "not scored: the log queue was full"
+    if score:
+        try:
+            scores = _sensitive_scores(list(fields.values()))
+        except Exception:
+            logger.exception("call-log redaction scoring failed for %s", tool)
+            reason = "not scored: redaction scoring failed"
+    for index, key in enumerate(fields):
+        if scores is None:
+            out[key] = _redacted(out[key], None, reason)
+        elif scores[index] >= CALL_LOG_REDACT_THRESHOLD:
+            out[key] = _redacted(out[key], scores[index])
     return out
 
 
-def _log_call(tool: str, arguments: dict[str, Any], result: dict[str, Any], elapsed_ms: float) -> None:
-    """Append one JSONL record of a completed call. Never raises: a logging bug
-    must not fail the call it is describing."""
+def _write_record(record: dict[str, Any], tool: str, arguments: dict[str, Any], result: dict[str, Any], score: bool) -> None:
     call_log = _call_logger()
     if call_log is None:
+        return
+    record["arguments"] = _logged_arguments(tool, arguments, result, score)
+    call_log.info(json.dumps(record, default=str, ensure_ascii=False))
+
+
+def _log_worker() -> None:
+    while True:
+        item = _log_queue.get()
+        try:
+            _write_record(*item, score=True)
+        except Exception:
+            logger.exception("call logging failed for %s", item[1])
+        finally:
+            _log_queue.task_done()
+
+
+def _start_log_worker() -> None:
+    global _log_worker_thread
+    with _call_log_lock:
+        if _log_worker_thread is None:
+            _log_worker_thread = threading.Thread(target=_log_worker, name="sys1-call-log", daemon=True)
+            _log_worker_thread.start()
+
+
+def flush_call_log(timeout: float = 5.0) -> bool:
+    """Wait until every queued record is written; False if `timeout` ran out first."""
+    deadline = time.monotonic() + timeout
+    while _log_queue.unfinished_tasks:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+atexit.register(flush_call_log)
+
+
+def mcp_caller() -> dict[str, Any]:
+    """Who made the current MCP call: the client's name and version from
+    `initialize`, the session id, and the transport. Empty outside an MCP request,
+    and any part the client did not supply is left out."""
+    try:
+        ctx = get_context()
+    except RuntimeError:
+        return {}
+    caller: dict[str, Any] = {}
+    try:
+        info = ctx.session.client_params.client_info
+        caller["client"] = {"name": info.name, "version": info.version}
+    except (AttributeError, RuntimeError):
+        pass
+    try:
+        caller["session"] = ctx.session_id
+    except RuntimeError:
+        pass
+    if ctx.transport:
+        caller["transport"] = ctx.transport
+    return caller
+
+
+def _log_call(
+    tool: str, arguments: dict[str, Any], result: dict[str, Any], elapsed_ms: float,
+    route: str, caller: dict[str, Any] | None = None,
+) -> None:
+    """Queue one JSONL record of a completed call and return at once.
+
+    Redaction scoring is model work, so it runs on the log thread after the
+    caller has its answer (`.agent/docs/usage-findings.md` "Cost and noise").
+    `route` is how the call arrived: `mcp`, `predict` or `systemone`. Never
+    raises: a logging bug must not fail the call it is describing.
+    """
+    if _call_logger() is None:
         return
     try:
         truncation = result.get("truncation") or {}
         record: dict[str, Any] = {
             "ts": round(time.time(), 3),
             "tool": tool,
-            "arguments": _logged_arguments(tool, arguments, result),
+            "route": route,
+            "caller": caller or {},
+            "arguments": None,
             "backend": result.get("backend"),
             "model": result.get("model"),
             "checkpoint": result.get("checkpoint"),
@@ -519,7 +671,7 @@ def _log_call(tool: str, arguments: dict[str, Any], result: dict[str, Any], elap
             "prefix_truncated": truncation.get("prefix_truncated", False),
             "elapsed_ms": round(elapsed_ms, 1),
         }
-        if tool in {"sys1_select_tests", "sys1_verify_outcome", "sys1_cache_fit", "sys1_pack_context"}:
+        if tool in WORKFLOW_TOOLS:
             record["workflow_result"] = {
                 key: result[key] for key in ("mode", "status", "action", "reason", "used_tokens")
                 if key in result
@@ -531,7 +683,11 @@ def _log_call(tool: str, arguments: dict[str, Any], result: dict[str, Any], elap
             record["truncated_items"] = len(truncation.get("truncated_items") or [])
         else:
             record["answers"] = result.get("answers")
-        call_log.info(json.dumps(record, default=str, ensure_ascii=False))
+        _start_log_worker()
+        try:
+            _log_queue.put_nowait((record, tool, arguments, result))
+        except queue.Full:
+            _write_record(record, tool, arguments, result, score=False)
     except Exception:
         logger.exception("call logging failed for %s", tool)
 
@@ -567,7 +723,7 @@ TOOL_SURFACE: dict[str, dict[str, Any]] = {
     },
     "sys1_relevant": {
         "arguments": ["task", "context"],
-        "response_keys": ["answers", "usage", "truncation", *_PROVENANCE],
+        "response_keys": ["answers", "question", "usage", "truncation", *_PROVENANCE],
         "local": relevant_locally,
     },
     "sys1_select_tests": {
@@ -591,12 +747,17 @@ TOOL_SURFACE: dict[str, dict[str, Any]] = {
         "local": pack_context_locally,
     },
 }
+if not WORKFLOW_TOOLS_ENABLED:
+    for _name in WORKFLOW_TOOLS:
+        del TOOL_SURFACE[_name]
 
 
 def run_tool_locally(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Run one tool in this process, on this process's backend. The daemon calls this."""
     spec = TOOL_SURFACE.get(tool)
     if spec is None:
+        if tool in WORKFLOW_TOOLS:
+            raise ValueError(f"{tool} is off on this server; it is served only with SYS1_WORKFLOW_TOOLS=1")
         raise ValueError(f"unknown tool {tool!r}; choose one of {sorted(TOOL_SURFACE)}")
     return spec["local"](**arguments)
 
@@ -606,15 +767,18 @@ def _dispatch(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
     An unreachable daemon is reported on the answer itself, because a log line
     never reaches the caller. The body goes to the daemon's `/predict` route as
-    `{"tool", "arguments"}`, one route for every tool.
+    `{"tool", "arguments", "caller"}`, one route for every tool. A call the
+    daemon answered is logged there, under this client's identity, and not
+    again here.
     """
     started = time.perf_counter()
+    caller = mcp_caller()
     daemon_url = os.environ.get("SYS1_DAEMON_URL")
     if daemon_url:
         try:
             response = httpx.post(
                 f"{daemon_url.rstrip('/')}/predict",
-                json={"tool": tool, "arguments": arguments},
+                json={"tool": tool, "arguments": arguments, "caller": caller},
                 timeout=DAEMON_TIMEOUT_SECONDS,
             )
             # A reachable daemon that answered with an error is not a transport
@@ -648,7 +812,8 @@ def _dispatch(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     elapsed_ms = (time.perf_counter() - started) * 1000
     if tool == "sys1_health":
         result["round_trip_ms"] = round(elapsed_ms, 1)
-    _log_call(tool, arguments, result, elapsed_ms)
+    if result["served_by"] != "daemon":
+        _log_call(tool, arguments, result, elapsed_ms, "mcp", caller)
     return result
 
 
@@ -874,22 +1039,25 @@ def sys1_relevant(
                 "One candidate piece of context to test against `task` — a file "
                 "excerpt, a memory fact, a search result, a paragraph of a brief. "
                 "Call once per candidate; for many candidates against the same "
-                "task use `sys1_classify` with the same question instead."
+                "task use `sys1_classify` with the `question` this tool returns."
             )
         ),
     ],
 ) -> dict[str, Any]:
     """Ask whether one piece of context is relevant to a task, before keeping it.
 
-    A thin `sys1_ask` wrapper, fixed to one `noul` question and the backend's
-    `trace` model: this is a judgment about the agent's own task state, not about
-    the content of `context`. It costs one inference call — cheap enough to run
-    per candidate while refining a task or trimming a brief.
+    A thin `sys1_ask` wrapper, fixed to one question and the backend's `trace`
+    model: this is a judgment about the agent's own task state, not about the
+    content of `context`. It costs one inference call — cheap enough to run per
+    candidate while refining a task or trimming a brief.
 
-    Use it while narrowing down a task — is this file, memory fact, or search
-    result actually needed, or can it be dropped — or right before launching a
-    subagent, to cut its brief down to what the task needs instead of
-    forwarding everything gathered so far.
+    Use it on context you are genuinely unsure about: is this file, memory fact,
+    or search result needed, or can it be dropped — or right before launching a
+    subagent, to cut its brief down to what the task needs. Asking about
+    context you have already decided to keep tells you nothing. For many
+    candidates against one task, call `sys1_classify` once with this tool's
+    `question` and each item's text as "Task: <task>\n\nCandidate
+    context:\n<context>"; with a `choice` question, read `probabilities.A`.
 
     Example: task "Fix the off-by-one in the pagination cursor", context "This
     module also defines the CSV export helper, unrelated to pagination." ->
@@ -899,13 +1067,13 @@ def sys1_relevant(
     Returns `answers.relevant`: `noul` is the probability `context` is
     relevant to `task`. Read `noul` directly, not `confidence` — a near-0.5
     answer is undecided, not "keep it anyway" (see `sys1_ask`'s "Reading the
-    answer"). Also reports `truncation` if `context` was long enough to be cut,
-    and the usual `backend`/`model`/`checkpoint`/`served_by` provenance.
+    answer"). `question` is the exact question asked. Also reports `truncation`
+    if `context` was long enough to be cut, and the usual
+    `backend`/`model`/`checkpoint`/`served_by` provenance.
     """
     return _dispatch("sys1_relevant", {"task": task, "context": context})
 
 
-@app.tool
 def sys1_select_tests(
     diff_chunks: list[str],
     tests: list[dict[str, Any]],
@@ -927,7 +1095,6 @@ def sys1_select_tests(
     })
 
 
-@app.tool
 def sys1_verify_outcome(
     goal: str, tool_result: str, evidence: str,
     checks: list[dict[str, Any]] | None = None,
@@ -944,7 +1111,6 @@ def sys1_verify_outcome(
     })
 
 
-@app.tool
 def sys1_cache_fit(
     new_request: str, cached_request: str, cached_answer: str,
     new_scope: dict[str, Any], cached_scope: dict[str, Any], expires_at: str,
@@ -967,7 +1133,6 @@ def sys1_cache_fit(
     })
 
 
-@app.tool
 def sys1_pack_context(
     task: str, candidates: list[dict[str, Any]], pinned_ids: list[str],
     budget_tokens: int, novelty_threshold: float | None = None,
@@ -986,3 +1151,9 @@ def sys1_pack_context(
         "task": task, "candidates": candidates, "pinned_ids": pinned_ids,
         "budget_tokens": budget_tokens, "novelty_threshold": novelty_threshold,
     })
+
+
+# Off by default: see `WORKFLOW_TOOLS_ENABLED`.
+if WORKFLOW_TOOLS_ENABLED:
+    for _tool in (sys1_select_tests, sys1_verify_outcome, sys1_cache_fit, sys1_pack_context):
+        app.tool(_tool)

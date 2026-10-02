@@ -17,10 +17,15 @@ Two non-MCP routes share the warm backend:
 
 Serves HTTPS when `SYS1_MCP_TLS_CERT` and `SYS1_MCP_TLS_KEY` both name readable
 files, and plain HTTP otherwise. See README.md.
+
+The access log leaves out requests that carry no news: MCP clients probing for
+OAuth discovery on every connect, and clients retrying a session id the server
+dropped at a restart. `SYS1_ACCESS_LOG=all` keeps every line.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any
@@ -29,6 +34,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .server import BACKEND, TOOL_SURFACE, _log_call, app, run_tool_locally
+
+# Read once, with the other settings, before any model load.
+ACCESS_LOG_ALL = os.environ.get("SYS1_ACCESS_LOG", "quiet") == "all"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -73,7 +81,27 @@ async def _json_body(request: Request) -> tuple[Any, JSONResponse | None]:
         return None, JSONResponse({"error": f"body is not JSON: {exc}"}, status_code=400)
 
 
-def _run_logged(tool: str, arguments: dict[str, Any]) -> JSONResponse:
+def _http_caller(request: Request, forwarded: Any = None) -> dict[str, Any]:
+    """Who sent an HTTP request: the identity a forwarding `sys1-mcp` passed on
+    from its own MCP client, if any, plus the `User-Agent`. Only short string
+    fields are kept, since the body is the client's to fill."""
+    caller: dict[str, Any] = {}
+    if isinstance(forwarded, dict):
+        client = forwarded.get("client")
+        if isinstance(client, dict):
+            caller["client"] = {
+                key: str(client[key])[:200] for key in ("name", "version") if client.get(key) is not None
+            }
+        for key in ("session", "transport"):
+            if isinstance(forwarded.get(key), str):
+                caller[key] = forwarded[key][:200]
+    agent = request.headers.get("user-agent")
+    if agent:
+        caller["user_agent"] = agent[:200]
+    return caller
+
+
+def _run_logged(tool: str, arguments: dict[str, Any], route: str, caller: dict[str, Any]) -> JSONResponse:
     """Run one tool and log it like an MCP call. A model failure is not caught
     here: it must surface as a 500, never as an answer (`sys1_screen` fails
     closed on it)."""
@@ -82,7 +110,7 @@ def _run_logged(tool: str, arguments: dict[str, Any]) -> JSONResponse:
         result = run_tool_locally(tool, arguments)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    _log_call(tool, arguments, result, (time.perf_counter() - started) * 1000)
+    _log_call(tool, arguments, result, (time.perf_counter() - started) * 1000, route, caller)
     return JSONResponse(result)
 
 
@@ -99,7 +127,10 @@ async def predict(request: Request) -> JSONResponse:
         return error
     if not isinstance(payload, dict) or "tool" not in payload:
         return JSONResponse({"error": 'expected {"tool": ..., "arguments": {...}}'}, status_code=400)
-    return _run_logged(str(payload["tool"]), dict(payload.get("arguments") or {}))
+    return _run_logged(
+        str(payload["tool"]), dict(payload.get("arguments") or {}),
+        "predict", _http_caller(request, payload.get("caller")),
+    )
 
 
 @app.custom_route("/v1/systemone", methods=["POST"])
@@ -118,7 +149,31 @@ async def systemone(request: Request) -> JSONResponse:
     return _run_logged(
         "sys1_ask",
         {"state": payload["state"], "questions": payload["questions"], "model": payload.get("model")},
+        "systemone", _http_caller(request),
     )
+
+
+class _QuietAccessLog(logging.Filter):
+    """Drop access-log lines that repeat on every connect or restart.
+
+    In the Laya-period log, 167 connects each probed six OAuth discovery URLs
+    (404) and sent `GET /mcp` without a session (400), and 282 `GET /mcp` 404s
+    were clients reusing a session id after a restart
+    (`.agent/docs/usage-findings.md` "Cost and noise"). This server has no OAuth,
+    and a client recovers from a dropped session on its own.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        _client, method, path, _version, status = args
+        path = str(path).split("?", 1)[0]
+        if "/.well-known/" in path and status == 404:
+            return False
+        if path == "/mcp" and (status == 404 or (method == "GET" and status == 400)):
+            return False
+        return True
 
 
 def _tls_config() -> dict[str, str]:
@@ -159,6 +214,10 @@ def main() -> None:
     # request pays a model load and the LRU never evicts one to serve another.
     BACKEND.load()
     _ready = True
+    if not ACCESS_LOG_ALL:
+        # On the logger, not a handler: uvicorn rebuilds its handlers at startup
+        # but leaves a logger's filters in place.
+        logging.getLogger("uvicorn.access").addFilter(_QuietAccessLog())
     app.run(
         transport="streamable-http",
         host=host,

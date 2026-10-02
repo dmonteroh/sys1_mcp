@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Restart the sys1-mcp-http LaunchAgent and warm it with one call of every
-# question type. See README.md "Restarting and warming" and skills/sys1-mcp/SKILL.md.
+# question type. See README.md "Checking, stopping, restarting" and skills/sys1-mcp/SKILL.md.
 set -euo pipefail
 
 LABEL=com.sys1-mcp.http
@@ -192,10 +192,17 @@ for route in $MODELS; do
 done
 # sys1_relevant always uses the trace-role model, regardless of $MODELS.
 warm_tool 'relevant' sys1_relevant '{"task":"Fix the off-by-one in the pagination cursor","context":"This module also defines the CSV export helper, unrelated to pagination."}' answers || status=1
-warm_tool 'select tests' sys1_select_tests '{"diff_chunks":["Changed pagination cursor calculation"],"tests":[{"id":"pagination","path":"tests/pagination.spec.ts","title":"opens page two"}],"changed_files":[]}' mode || status=1
-warm_tool 'verify outcome' sys1_verify_outcome '{"goal":"A report exists","tool_result":"The report job completed","evidence":"The report file is present","checks":[{"name":"file exists","passed":true}]}' status || status=1
-warm_tool 'cache fit' sys1_cache_fit '{"new_request":"Show April totals","cached_request":"Show April totals","cached_answer":"April total is 12","new_scope":{"tenant":"demo","month":"April"},"cached_scope":{"tenant":"demo","month":"April"},"expires_at":"2099-01-01T00:00:00Z"}' action || status=1
-warm_tool 'pack context' sys1_pack_context '{"task":"Fix pagination","candidates":[{"id":"constraint","text":"Keep the public API stable","tokens":6},{"id":"trace","text":"Page two starts at the wrong cursor","tokens":7}],"pinned_ids":["constraint"],"budget_tokens":20}' selected_ids || status=1
+# The workflow tools are served only with SYS1_WORKFLOW_TOOLS=1, so warm them
+# only when /health lists them.
+TOOLS=$(curl -s -m 10 "${BASE_URL}/health" | python3 -c 'import sys, json; print(" ".join(json.load(sys.stdin)["tools"]))')
+if [[ " $TOOLS " == *" sys1_select_tests "* ]]; then
+	warm_tool 'select tests' sys1_select_tests '{"diff_chunks":["Changed pagination cursor calculation"],"tests":[{"id":"pagination","path":"tests/pagination.spec.ts","title":"opens page two"}],"changed_files":[]}' mode || status=1
+	warm_tool 'verify outcome' sys1_verify_outcome '{"goal":"A report exists","tool_result":"The report job completed","evidence":"The report file is present","checks":[{"name":"file exists","passed":true}]}' status || status=1
+	warm_tool 'cache fit' sys1_cache_fit '{"new_request":"Show April totals","cached_request":"Show April totals","cached_answer":"April total is 12","new_scope":{"tenant":"demo","month":"April"},"cached_scope":{"tenant":"demo","month":"April"},"expires_at":"2099-01-01T00:00:00Z"}' action || status=1
+	warm_tool 'pack context' sys1_pack_context '{"task":"Fix pagination","candidates":[{"id":"constraint","text":"Keep the public API stable","tokens":6},{"id":"trace","text":"Page two starts at the wrong cursor","tokens":7}],"pinned_ids":["constraint"],"budget_tokens":20}' selected_ids || status=1
+else
+	printf '  %-18s %-16s skipped (off on this server)\n' 'workflows' 'SYS1_WORKFLOW_TOOLS'
+fi
 warm_tool 'health' sys1_health '{}' probe_ms || status=1
 
 if [ "$status" -ne 0 ]; then
