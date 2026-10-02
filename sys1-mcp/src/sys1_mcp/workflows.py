@@ -1,7 +1,8 @@
-"""Bounded agent workflows built from Laya's existing typed decisions.
+"""Bounded agent workflows built from System One typed decisions.
 
-The caller supplies the predictor and batch classifier. Keeping orchestration
-separate from the transport lets the MCP and /predict surfaces share it.
+The caller supplies the predictor and batch classifier, already bound to the
+model that answers (the server binds its `trace` role). Keeping orchestration
+separate from the transport and the backend lets every surface share it.
 """
 
 from __future__ import annotations
@@ -9,10 +10,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-Predict = Callable[[str, dict[str, Any], str | None], dict[str, Any]]
-Classify = Callable[[list[Any], dict[str, Any], str | None], dict[str, Any]]
+Predict = Callable[[str, dict[str, Any]], dict[str, Any]]
+Classify = Callable[[list[Any], dict[str, Any]], dict[str, Any]]
 
-WORKFLOW_ROUTE = "typed-decisions"
 TEST_QUESTION = {
     "affected": {
         "type": "noul",
@@ -74,7 +74,7 @@ def _cut(result: dict[str, Any]) -> bool:
 
 
 def _provenance(result: dict[str, Any]) -> dict[str, Any]:
-    return {key: result[key] for key in ("checkpoint", "limits", "route", "route_reason") if key in result}
+    return {key: result[key] for key in ("backend", "model", "checkpoint", "limits", "model_reason") if key in result}
 
 
 def select_tests(
@@ -134,7 +134,7 @@ def select_tests(
             for test in tests
         ]
         try:
-            result = classify(items, TEST_QUESTION, WORKFLOW_ROUTE)
+            result = classify(items, TEST_QUESTION)
             provenance = _provenance(result)
             if result.get("truncation", {}).get("prefix_truncated") or result.get("truncation", {}).get("truncated_items"):
                 return {**full_suite("model input was truncated", scores), **provenance}
@@ -195,7 +195,7 @@ def verify_outcome(
         return {"status": "needs_evidence", "reason": "no independent evidence was supplied"}
     state = f"Requested outcome:\n{goal}\n\nTool result or claim:\n{tool_result}\n\nIndependent evidence:\n{evidence}"
     try:
-        result = predict(state, OUTCOME_QUESTION, WORKFLOW_ROUTE)
+        result = predict(state, OUTCOME_QUESTION)
         if _cut(result):
             return {"status": "inconclusive", "reason": "model input was truncated", **_provenance(result)}
         answer = result["answers"]["outcome"]
@@ -240,7 +240,7 @@ def cache_fit(
         return {"action": "recompute", "reason": "cached evidence expired", "model_called": False}
     state = f"New request:\n{new_request}\n\nCached request:\n{cached_request}\n\nCached answer:\n{cached_answer}"
     try:
-        result = predict(state, CACHE_QUESTION, WORKFLOW_ROUTE)
+        result = predict(state, CACHE_QUESTION)
         if _cut(result):
             return {"action": "recompute", "reason": "model input was truncated", "model_called": True, **_provenance(result)}
         answer = result["answers"]["fit"]
@@ -308,7 +308,7 @@ def pack_context(
     if remaining:
         items = [{"id": item["id"], "text": f"Task:\n{task}\n\nCandidate context:\n{item['text']}"} for item in remaining]
         try:
-            result = classify(items, RELEVANCE_QUESTION, WORKFLOW_ROUTE)
+            result = classify(items, RELEVANCE_QUESTION)
             provenance = _provenance(result)
             if result.get("truncation", {}).get("prefix_truncated") or len(result["items"]) != len(remaining):
                 raise ValueError("relevance batch was truncated or incomplete")
@@ -345,7 +345,7 @@ def pack_context(
             for row in to_compare
         ]
         try:
-            novelty_result = classify(novelty_items, NOVELTY_QUESTION, WORKFLOW_ROUTE)
+            novelty_result = classify(novelty_items, NOVELTY_QUESTION)
             if novelty_result.get("truncation", {}).get("prefix_truncated") or len(novelty_result["items"]) != len(to_compare):
                 raise ValueError("novelty batch was truncated or incomplete")
             for row, answer in zip(to_compare, novelty_result["items"]):
@@ -379,7 +379,7 @@ def pack_context(
             retained = "\n\n".join(item["text"] for item in selected)
             state = f"Task:\n{task}\n\nRetained context:\n{retained}\n\nCandidate context:\n{candidate['text']}"
             try:
-                result = predict(state, NOVELTY_QUESTION, WORKFLOW_ROUTE)
+                result = predict(state, NOVELTY_QUESTION)
                 if _cut(result):
                     novelty = None
                 else:

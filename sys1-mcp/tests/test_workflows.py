@@ -14,13 +14,13 @@ from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from laya_mcp import workflows  # noqa: E402
-from laya_mcp import daemon  # noqa: E402
-from laya_mcp.server import TOOL_SURFACE  # noqa: E402
+from sys1_mcp import workflows  # noqa: E402
+from sys1_mcp import daemon  # noqa: E402
+from sys1_mcp.server import TOOL_SURFACE  # noqa: E402
 
 
 def classify_with(scores: dict[str, float], truncated: bool = False):
-    def classify(items: list[Any], questions: dict[str, Any], route: str | None) -> dict[str, Any]:
+    def classify(items: list[Any], questions: dict[str, Any]) -> dict[str, Any]:
         key = next(iter(questions))
         return {
             "items": [
@@ -32,7 +32,7 @@ def classify_with(scores: dict[str, float], truncated: bool = False):
                 for item in items
             ],
             "truncation": {"truncated_items": [item["id"] for item in items] if truncated else [], "prefix_truncated": False},
-            "route": route,
+            "model": "test-model",
             "checkpoint": "test-checkpoint",
         }
 
@@ -47,7 +47,7 @@ def choice_result(choice: str = "A", cut: bool = False) -> dict[str, Any]:
             "novel": {"noul": 0.2},
         },
         "truncation": {"truncated": cut, "prefix_truncated": False},
-        "route": "typed-decisions",
+        "model": "test-model",
         "checkpoint": "test-checkpoint",
     }
 
@@ -85,42 +85,58 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(result["run_ids"], ["billing", "search"])
 
 
-class TestExistingSurface(unittest.TestCase):
-    def test_original_tool_arguments_remain_available(self) -> None:
+def request_for(path: str, payload: dict[str, Any]) -> Request:
+    body = json.dumps(payload).encode()
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({"type": "http", "method": "POST", "path": path, "headers": []}, receive)
+
+
+class TestSurface(unittest.TestCase):
+    def test_tool_arguments(self) -> None:
         expected = {
-            "laya_ask": ["state", "questions", "checkpoint"],
-            "laya_classify": ["items", "questions", "checkpoint"],
-            "laya_screen": ["text"],
-            "laya_health": [],
-            "laya_relevant": ["task", "context"],
+            "sys1_ask": ["state", "questions", "model"],
+            "sys1_classify": ["items", "questions", "model"],
+            "sys1_screen": ["text"],
+            "sys1_health": [],
+            "sys1_relevant": ["task", "context"],
         }
         for tool, arguments in expected.items():
             with self.subTest(tool=tool):
                 self.assertEqual(TOOL_SURFACE[tool]["arguments"], arguments)
 
-    def test_predict_keeps_legacy_and_tool_payloads(self) -> None:
-        def request_for(payload: dict[str, Any]) -> Request:
-            body = json.dumps(payload).encode()
+    def test_every_tool_runs_locally(self) -> None:
+        for tool, spec in TOOL_SURFACE.items():
+            with self.subTest(tool=tool):
+                self.assertTrue(callable(spec["local"]))
 
-            async def receive() -> dict[str, Any]:
-                return {"type": "http.request", "body": body, "more_body": False}
-
-            return Request({"type": "http", "method": "POST", "path": "/predict", "headers": []}, receive)
-
+    def test_predict_dispatches_tool_payloads(self) -> None:
         with (
             patch.object(daemon, "_ready", True),
-            patch.object(daemon, "predict_locally", return_value={"answers": {"x": {"noul": 0.7}}}) as legacy,
             patch.object(daemon, "run_tool_locally", return_value={"mode": "full_suite"}) as dispatched,
             patch.object(daemon, "_log_call"),
         ):
-            old = asyncio.run(daemon.predict(request_for({"text": "state", "schema": {"x": {}}, "checkpoint": "base"})))
-            new = asyncio.run(daemon.predict(request_for({"tool": "laya_select_tests", "arguments": {"diff_chunks": []}})))
-        self.assertEqual(old.status_code, 200)
-        self.assertEqual(json.loads(old.body)["answers"]["x"]["noul"], 0.7)
-        self.assertEqual(new.status_code, 200)
-        self.assertEqual(json.loads(new.body)["mode"], "full_suite")
-        legacy.assert_called_once_with("state", {"x": {}}, "base")
-        dispatched.assert_called_once_with("laya_select_tests", {"diff_chunks": []})
+            ok = asyncio.run(daemon.predict(request_for("/predict", {"tool": "sys1_select_tests", "arguments": {"diff_chunks": []}})))
+            bad = asyncio.run(daemon.predict(request_for("/predict", {"text": "state", "schema": {}})))
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(json.loads(ok.body)["mode"], "full_suite")
+        self.assertEqual(bad.status_code, 400)
+        dispatched.assert_called_once_with("sys1_select_tests", {"diff_chunks": []})
+
+    def test_systemone_route_asks_with_the_wire_contract(self) -> None:
+        with (
+            patch.object(daemon, "_ready", True),
+            patch.object(daemon, "run_tool_locally", return_value={"model": "m", "answers": {"x": {"noul": 0.7}}}) as dispatched,
+            patch.object(daemon, "_log_call"),
+        ):
+            ok = asyncio.run(daemon.systemone(request_for("/v1/systemone", {"state": "s", "questions": {"x": {}}, "model": "m"})))
+            bad = asyncio.run(daemon.systemone(request_for("/v1/systemone", {"state": "s"})))
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(json.loads(ok.body)["answers"]["x"]["noul"], 0.7)
+        self.assertEqual(bad.status_code, 400)
+        dispatched.assert_called_once_with("sys1_ask", {"state": "s", "questions": {"x": {}}, "model": "m"})
 
 
 class TestOutcome(unittest.TestCase):
@@ -169,10 +185,10 @@ class TestContext(unittest.TestCase):
             {"id": "trace", "text": "Cursor points to the wrong row", "tokens": 4},
         ]
 
-        def classify(items: list[Any], questions: dict[str, Any], route: str | None) -> dict[str, Any]:
+        def classify(items: list[Any], questions: dict[str, Any]) -> dict[str, Any]:
             key = next(iter(questions))
             scores = {"relevant": {"repeat": 0.9, "trace": 0.8}, "novel": {"repeat": 0.1, "trace": 0.9}}
-            return classify_with(scores[key])(items, questions, route)
+            return classify_with(scores[key])(items, questions)
 
         result = workflows.pack_context(
             "Fix cursor", candidates, ["rule"], 6, None,

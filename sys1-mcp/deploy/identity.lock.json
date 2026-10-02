@@ -1,9 +1,14 @@
 {
-  "default_route": "typed-decisions",
+  "backend": "laya-mlx",
+  "default_model": "typed-decisions",
+  "roles": {
+    "content": "english",
+    "trace": "typed-decisions"
+  },
   "runtime": {
     "laya_mlx": "0.1.0"
   },
-  "routes": {
+  "models": {
     "english": {
       "checkpoint": "aac6fef/laya-mlx",
       "snapshot": "20aed815fc6acde75733882e7ec0e3f28aeb9717",
