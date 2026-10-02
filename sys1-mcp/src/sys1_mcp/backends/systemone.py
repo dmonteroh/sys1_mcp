@@ -15,6 +15,9 @@ Configuration, all read once at startup:
   `model`. Unset, one model named `default` is served and no `model` is sent,
   so the endpoint picks its own.
 - `SYS1_CONTEXT_TOKENS`, `SYS1_TIMEOUT`, `SYS1_CONCURRENCY`: see below.
+- `SYS1_REFUSES_OVERLONG=1`: the endpoint rejects input over its limit instead of
+  cutting it (Jev-Style answers 422 "Nothing was truncated"; Kev the same), so an
+  answer it returns was read whole and is reported as `truncated: false`.
 
 What this backend cannot know, it says so: an endpoint that does not report
 truncation gets `truncation.checked: false` on every answer, never a claim
@@ -48,6 +51,13 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 # Chosen default: parallel requests for a many-state call. Each state is one
 # request, since `/v1/systemone` takes one state.
 DEFAULT_CONCURRENCY = 8
+
+# For an endpoint that refuses over-limit input: anything it answered, it read whole.
+READ_WHOLE = {
+    "truncated": False,
+    "checked": True,
+    "message": "This endpoint refuses input over its limit instead of cutting it, so the whole state was read.",
+}
 
 UNREPORTED = {
     "truncated": None,
@@ -88,6 +98,7 @@ class SystemOneBackend(Backend):
         self.context_tokens = _env_number("SYS1_CONTEXT_TOKENS", DEFAULT_CONTEXT_TOKENS, int)
         self.timeout = _env_number("SYS1_TIMEOUT", DEFAULT_TIMEOUT_SECONDS, float)
         self.concurrency = _env_number("SYS1_CONCURRENCY", DEFAULT_CONCURRENCY, int)
+        self.refuses_overlong = os.environ.get("SYS1_REFUSES_OVERLONG", "0") == "1"
         headers = {"Content-Type": "application/json"}
         key = os.environ.get("SYS1_API_KEY")
         if key:
@@ -120,8 +131,24 @@ class SystemOneBackend(Backend):
 
     # -- inference ----------------------------------------------------------
 
+    @staticmethod
+    def _wire_questions(questions: dict[str, Any]) -> dict[str, Any]:
+        """Questions in the wire contract's own shape.
+
+        The Jev contract gives `choice` criteria as an object of option -> description;
+        Laya also accepts a bare label list, so callers write both. A list is sent as
+        `{label: null}`, which strict endpoints accept (Jev-Style rejects a list with
+        422 `invalid_question`), and the answer's keys are the same labels either way.
+        """
+        out = {}
+        for qid, spec in questions.items():
+            if isinstance(spec, dict) and spec.get("type") == "choice" and isinstance(spec.get("criteria"), list):
+                spec = {**spec, "criteria": {str(label): None for label in spec["criteria"]}}
+            out[qid] = spec
+        return out
+
     def predict(self, state: Any, questions: dict[str, Any], model: str) -> dict[str, Any]:
-        body: dict[str, Any] = {"state": state, "questions": questions}
+        body: dict[str, Any] = {"state": state, "questions": self._wire_questions(questions)}
         if self._send_model:
             body["model"] = model
         response = self._client.post(self.endpoint.replace("{model}", model), json=body)
@@ -148,7 +175,7 @@ class SystemOneBackend(Backend):
             # This project's daemon names its weights in `checkpoint`; any other
             # endpoint names its model in `model`.
             "checkpoint": data.get("checkpoint") or data.get("model"),
-            "truncation": data.get("truncation") or dict(UNREPORTED),
+            "truncation": data.get("truncation") or dict(READ_WHOLE if self.refuses_overlong else UNREPORTED),
         }
         if isinstance(data.get("limits"), dict):
             result["limits"] = data["limits"]

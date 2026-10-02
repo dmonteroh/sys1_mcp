@@ -15,14 +15,14 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>SYS1_BACKEND</key>
-		<string>laya-mlx</string>
-		<key>SYS1_MODEL_DEFAULT</key>
-		<string>typed-decisions</string>
-		<key>LAYA_CHECKPOINT_ENGLISH</key>
-		<string>aac6fef/laya-mlx</string>
-		<key>LAYA_CHECKPOINT_TYPED_DECISIONS</key>
-		<string>aac6fef/laya-typed-decisions-mlx</string>
-		<key>LAYA_PRELOAD</key>
+		<string>systemone</string>
+		<key>SYS1_ENDPOINT</key>
+		<string>http://127.0.0.1:8766/v1/systemone</string>
+		<key>SYS1_MODELS</key>
+		<string>jev-style-0.8b-v3</string>
+		<key>SYS1_CONTEXT_TOKENS</key>
+		<string>25600</string>
+		<key>SYS1_REFUSES_OVERLONG</key>
 		<string>1</string>
 		<key>SYS1_MCP_HOST</key>
 		<string>0.0.0.0</string>

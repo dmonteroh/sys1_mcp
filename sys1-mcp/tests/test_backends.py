@@ -177,6 +177,29 @@ class TestSystemOneBackend(unittest.TestCase):
         # No SYS1_MODELS: the endpoint picks its own model.
         self.assertNotIn("model", sent[0])
 
+    def test_choice_label_lists_are_sent_as_the_contracts_object(self) -> None:
+        sent: list[dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(json.loads(request.content))
+            answers = {**JEV_RESPONSE["answers"], "level": {"type": "score", "score": 1.0, "probabilities": {"0": 0.2, "1": 0.8}}}
+            return httpx.Response(200, json={**JEV_RESPONSE, "answers": answers})
+
+        backend = systemone_backend(handler)
+        backend.predict("state", {**QUESTIONS, "level": {"type": "score", "instructions": "q", "criteria": ["low", "high"]}}, "default")
+        self.assertEqual(sent[0]["questions"]["route"]["criteria"], {"billing": None, "technical": None})
+        self.assertEqual(sent[0]["questions"]["level"]["criteria"], ["low", "high"])
+
+    def test_an_endpoint_that_refuses_overlong_input_reads_whole(self) -> None:
+        backend = systemone_backend(lambda request: httpx.Response(200, json=JEV_RESPONSE), SYS1_REFUSES_OVERLONG="1")
+        result = backend.predict("state", QUESTIONS, "default")
+        self.assertIs(result["truncation"]["truncated"], False)
+        self.assertTrue(result["truncation"]["checked"])
+        self.assertEqual(backend.predict_many(["a"], QUESTIONS, "default")["truncated"], [[]])
+        too_long = systemone_backend(lambda request: httpx.Response(422, json={"error": {"code": "input_budget_exceeded"}}), SYS1_REFUSES_OVERLONG="1")
+        with self.assertRaisesRegex(ValueError, "input_budget_exceeded"):
+            too_long.predict("state", QUESTIONS, "default")
+
     def test_models_fill_the_body_and_the_path(self) -> None:
         seen: list[tuple[str, dict[str, Any]]] = []
 
