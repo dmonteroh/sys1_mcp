@@ -1,6 +1,17 @@
-.agent/indexes/
-.agent/rules/learned.md
+# Agent context (local, personal)
+.agent/
+.claude/
+.codex/
+CLAUDE.md
+AGENTS.md
+
+# Scratch
+tmp/
+temp/
+
+# Python
 __pycache__/
 *.pyc
+
+# OS
 .DS_Store
-tmp/

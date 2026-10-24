@@ -1,0 +1,17 @@
+{
+  "backend": "systemone",
+  "default_model": "jev-style-0.8b-v3",
+  "roles": {
+    "content": "jev-style-0.8b-v3",
+    "trace": "jev-style-0.8b-v3"
+  },
+  "runtime": {
+    "endpoint": "http://127.0.0.1:8766/v1/systemone"
+  },
+  "models": {
+    "jev-style-0.8b-v3": {
+      "checkpoint": "jev-style-0.8b-decision-v3",
+      "endpoint": "http://127.0.0.1:8766/v1/systemone"
+    }
+  }
+}

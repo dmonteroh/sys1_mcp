@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.sys1-mcp.jev-style</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/USERNAME/.venvs/jev-style/bin/python</string>
+		<string>/Users/USERNAME/repo/sys1_mcp/sys1-mcp/scripts/jev-style-serve.py</string>
+		<string>serve</string>
+		<string>--release</string>
+		<string>0.8b-v3</string>
+		<string>--backend</string>
+		<string>mlx</string>
+		<string>--precision</string>
+		<string>bf16</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>8766</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/USERNAME/Library/Logs/com.sys1-mcp.jev-style.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/USERNAME/Library/Logs/com.sys1-mcp.jev-style.err.log</string>
+</dict>
+</plist>

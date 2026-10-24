@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.sys1-mcp.http</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/USERNAME/.venvs/sys1-mcp/bin/sys1-mcp-http</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SYS1_BACKEND</key>
+		<string>systemone</string>
+		<key>SYS1_ENDPOINT</key>
+		<string>http://127.0.0.1:8766/v1/systemone</string>
+		<key>SYS1_MODELS</key>
+		<string>jev-style-0.8b-v3</string>
+		<key>SYS1_CONTEXT_TOKENS</key>
+		<string>25600</string>
+		<key>SYS1_REFUSES_OVERLONG</key>
+		<string>1</string>
+		<key>SYS1_MCP_HOST</key>
+		<string>0.0.0.0</string>
+		<key>SYS1_MCP_PORT</key>
+		<string>8765</string>
+		<key>SYS1_MCP_TLS_CERT</key>
+		<string>/Users/USERNAME/.config/sys1-mcp/tls/sys1-mcp.pem</string>
+		<key>SYS1_MCP_TLS_KEY</key>
+		<string>/Users/USERNAME/.config/sys1-mcp/tls/sys1-mcp-key.pem</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/USERNAME/Library/Logs/com.sys1-mcp.http.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/USERNAME/Library/Logs/com.sys1-mcp.http.err.log</string>
+</dict>
+</plist>
