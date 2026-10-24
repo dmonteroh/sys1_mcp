@@ -194,10 +194,10 @@ Stop the server with `launchctl bootout gui/$(id -u)/com.sys1-mcp.http`. The mod
 | `--timeout SECONDS` | `SYS1_MCP_HEALTH_TIMEOUT` | `120` | how long to wait for `/health` |
 | | `SYS1_MCP_MODELS` | every model `/health` lists | models to warm |
 
-A plain restart does not re-read the plist. After editing it:
+A plain restart does not re-read the plist. The plists in `sys1-mcp/deploy/` write the home folder as `/Users/USERNAME`, because launchd does not expand `~` or `$HOME`, so install them with the placeholder replaced. After editing one:
 
 ```
-$ cp sys1-mcp/deploy/com.sys1-mcp.http.plist ~/Library/LaunchAgents/
+$ sed "s|/Users/USERNAME|$HOME|g" sys1-mcp/deploy/com.sys1-mcp.http.plist > ~/Library/LaunchAgents/com.sys1-mcp.http.plist
 $ ./sys1-mcp/scripts/restart-warm.sh --reload
 ```
 
@@ -235,7 +235,7 @@ Without `default_tools_approval_mode`, Codex asks before every call, and `codex 
 
 ### Claude Desktop
 
-Claude Desktop cannot reach this server by URL: its custom connectors connect from Anthropic's side, so `localhost` never arrives here. Register a local stdio server in `~/Library/Application Support/Claude/claude_desktop_config.json`, then quit and reopen the app:
+Claude Desktop cannot reach this server by URL: its custom connectors connect from Anthropic's side, so `localhost` never arrives here. Register a local stdio server in `~/Library/Application Support/Claude/claude_desktop_config.json`, with `USERNAME` replaced by your user name, then quit and reopen the app:
 
 ```json
 {
