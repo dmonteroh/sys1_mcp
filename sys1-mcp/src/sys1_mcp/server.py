@@ -67,7 +67,7 @@ CALL_LOG_QUEUE_MAX = 1000
 
 # The four workflow tools had 2 real uses in the Laya-period log while their
 # descriptions were 26% of the tool list every client loads
-# (`.agent/docs/usage-findings.md` "Usage"), so they are served only on request.
+# (call-log review, 2026-10-02), so they are served only on request.
 WORKFLOW_TOOLS = ("sys1_select_tests", "sys1_verify_outcome", "sys1_cache_fit", "sys1_pack_context")
 WORKFLOW_TOOLS_ENABLED = os.environ.get("SYS1_WORKFLOW_TOOLS", "0") in ("1", "true", "True")
 
@@ -89,7 +89,7 @@ def _add_margins(answers: dict[str, Any]) -> dict[str, Any]:
 
     `confidence` is normalized entropy, which reads low on a clear winner over a
     long tail. The top-two gap is the figure a caller deciding "act or ask" wants
-    (jkudish/jev-mcp gates on it; `.agent/docs/sources.md`). Existing fields are
+    (jkudish/jev-mcp gates on it). Existing fields are
     left exactly as the backend returned them.
     """
     for answer in answers.values():
@@ -318,7 +318,7 @@ def screen_locally(text: str) -> dict[str, Any]:
 # the content of `context` — so it uses the `trace` role, and the answer is
 # always one `noul` probability rather than a schema the caller designs per call.
 # Two wordings, picked per backend because each was measured on one model
-# (`.agent/docs/usage-findings.md` "Relevance", 170 judge-labelled relevant pairs):
+# (README "Relevance wording", 170 judge-labelled relevant pairs):
 # - `choice`, a neutral 2-option choice returned in the `noul` shape like
 #   `injection`: on Jev-Style it kept 152/170 relevant contexts at 0.5 against
 #   the `noul`'s 87, and clear negatives stayed at 0.04-0.25.
@@ -648,7 +648,7 @@ def _log_call(
     """Queue one JSONL record of a completed call and return at once.
 
     Redaction scoring is model work, so it runs on the log thread after the
-    caller has its answer (`.agent/docs/usage-findings.md` "Cost and noise").
+    caller has its answer (call-log review, 2026-10-02).
     `route` is how the call arrived: `mcp`, `predict` or `systemone`. Never
     raises: a logging bug must not fail the call it is describing.
     """

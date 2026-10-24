@@ -159,7 +159,7 @@ class _QuietAccessLog(logging.Filter):
     In the Laya-period log, 167 connects each probed six OAuth discovery URLs
     (404) and sent `GET /mcp` without a session (400), and 282 `GET /mcp` 404s
     were clients reusing a session id after a restart
-    (`.agent/docs/usage-findings.md` "Cost and noise"). This server has no OAuth,
+    (call-log review, 2026-10-02). This server has no OAuth,
     and a client recovers from a dropped session on its own.
     """
 
