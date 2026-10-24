@@ -6,7 +6,8 @@
 	<string>com.sys1-mcp.jev-style</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/USERNAME/.venvs/jev-style/bin/jev-style</string>
+		<string>/Users/USERNAME/.venvs/jev-style/bin/python</string>
+		<string>/Users/USERNAME/repo/ld_mcp/sys1-mcp/scripts/jev-style-serve.py</string>
 		<string>serve</string>
 		<string>--release</string>
 		<string>0.8b-v3</string>
