@@ -1,18 +1,20 @@
-# sys1-mcp
+# sys1_mcp
 
-A model-agnostic MCP server for System One decision models, run on one operator's machine. A System One model takes a state and typed questions (`noul`, `choice`, `score`) and returns probabilities instead of text. Laya, Jev and Clef are System One models. The server's tools never name a model family. Every answer comes from one configured **backend**:
+`sys1-mcp` is a model-agnostic MCP server for System One decision models, run on one operator's machine. A System One model takes a state and typed questions (`noul`, `choice`, `score`) and returns probabilities instead of text. Laya, Jev and Clef are System One models. The server's tools never name a model family. Every answer comes from one configured **backend**:
 
 - `systemone` (default) posts to any `/v1/systemone`-shaped HTTP endpoint: Jev, Clef on Workers AI, a local open server, or this project's own daemon.
 - `laya-mlx` runs Laya checkpoints in-process on Apple Silicon. It needs the `[laya]` extra.
 
-This host runs `systemone` against Jev-Style-0.8B-v3 (`chaoliangUNSW/Jev-Style-0.8B-Decision-v3-MLX`, bf16, MLX). Why that model: `.agent/docs/system-one-models.md`. Two LaunchAgents run:
+This host runs `systemone` against Jev-Style-0.8B-v3 (`chaoliangUNSW/Jev-Style-0.8B-Decision-v3-MLX`, bf16, MLX). Why that model: [Choosing the model](#choosing-the-model). Two LaunchAgents run:
 
 | LaunchAgent | Serves | Listens | Config |
 |---|---|---|---|
-| `com.sys1-mcp.jev-style` | the model: `jev-style serve --release 0.8b-v3 --backend mlx --precision bf16` from `~/.venvs/jev-style` | `127.0.0.1:8766`, plain HTTP, loopback only | `sys1-mcp/deploy/com.sys1-mcp.jev-style.plist` |
+| `com.sys1-mcp.jev-style` | the model: `sys1-mcp/scripts/jev-style-serve.py serve --release 0.8b-v3 --backend mlx --precision bf16` on `~/.venvs/jev-style`'s Python | `127.0.0.1:8766`, plain HTTP, loopback only | `sys1-mcp/deploy/com.sys1-mcp.jev-style.plist` |
 | `com.sys1-mcp.http` | the MCP server, pointed at the model | `0.0.0.0:8765`, HTTPS | `sys1-mcp/deploy/com.sys1-mcp.http.plist` |
 
-For the agent-facing tool contract, see `skills/sys1-mcp/SKILL.md`. For setup knowledge, network decisions and measurements, see `.agent/`.
+`jev-style-serve.py` runs jev-style's own CLI with the MLX buffer cache capped, which jev-style has no option for. The cap defaults to 0 bytes; `SYS1_MLX_CACHE_LIMIT_BYTES` overrides it.
+
+For the agent-facing tool contract, see `skills/sys1-mcp/SKILL.md`.
 
 ## Install
 
@@ -73,7 +75,7 @@ A remote endpoint receives every state, screened page and redaction probe. Every
 
 ### `laya-mlx`
 
-Models are `english` (alias `base`, 512-token budget) and `typed-decisions` (1024-token budget). The default and the `trace` role are `typed-decisions`, and the `content` role is `english`. Only this backend reports exact per-question truncation, batches texts into shared forward passes, chunks screening text with the real tokenizer, and pins a snapshot and calibration-config hash for the identity lock. The first start downloads the checkpoints, about 1.7 GB. Memory and startup figures: `.agent/docs/system-one-models.md`.
+Models are `english` (alias `base`, 512-token budget) and `typed-decisions` (1024-token budget). The default and the `trace` role are `typed-decisions`, and the `content` role is `english`. Only this backend reports exact per-question truncation, batches texts into shared forward passes, chunks screening text with the real tokenizer, and pins a snapshot and calibration-config hash for the identity lock. The first start downloads the checkpoints, about 1.7 GB. Memory and startup figures: [Resource cost](#resource-cost).
 
 | Var | Default | Meaning |
 |---|---|---|
@@ -125,7 +127,7 @@ It answers with a `result` naming `serverInfo` `sys1`.
 
 The last four are workflow tools, off unless `SYS1_WORKFLOW_TOOLS=1`. Off, they are left out of the tool list and `/health`, and `/predict` refuses them. Their contracts are in `skills/sys1-mcp/references/agent-workflows.md`.
 
-`sys1_relevant` asks a neutral two-option `choice` (A relevant, B not) and returns the probability of A as `noul`. On `laya-mlx` it asks a plain `noul` instead. Each wording is the one measured best on that model (`.agent/docs/usage-findings.md`). `SYS1_RELEVANCE_WORDING` overrides it. The answer's `question` field holds the exact question, for callers batching candidates through `sys1_classify`.
+`sys1_relevant` asks a neutral two-option `choice` (A relevant, B not) and returns the probability of A as `noul`. On `laya-mlx` it asks a plain `noul` instead. Each wording is the one measured best on that model ([Relevance wording](#relevance-wording)). `SYS1_RELEVANCE_WORDING` overrides it. The answer's `question` field holds the exact question, for callers batching candidates through `sys1_classify`.
 
 Every answer carries its provenance: `backend` and `model`, `checkpoint` and `limits` when known, `model_reason` (plus `model_note` when the default answered), and `served_by` (`daemon`, `local`, or `local-fallback`).
 
@@ -147,7 +149,14 @@ Every answer carries its provenance: `backend` and `model`, `checkpoint` and `li
 | `SYS1_CALL_LOG_BACKUPS` | `2` | rotated call-log files kept beyond the active one |
 | `SYS1_CALL_LOG_REDACT_THRESHOLD` | `0.5` | `sensitive_data` probability at or above which a logged text argument is redacted |
 
-LAN IP, port, bind address and firewall decisions: `.agent/docs/dev-workflows.md`.
+### Network
+
+- Port `8765`, because fastmcp's default `8000` collides with ad-hoc dev servers.
+- `com.sys1-mcp.http` binds `0.0.0.0`, so the server runs continuously and any host on the LAN can reach it, with no authentication. That exposure is an accepted choice for a trusted LAN. Stop the agent, or set `SYS1_MCP_HOST=127.0.0.1`, to close it.
+- The model server listens on loopback only. Containers and LAN clients reach the model through the daemon.
+- From a container, `localhost` and `127.0.0.1` do not reach this host. Use `host.docker.internal`, which also works under Podman, with the mkcert root CA in the container's trust store.
+- LAN clients should use `my-mac.local` rather than the LAN IP, which is DHCP-assigned. Read the IP at use time with `ipconfig getifaddr en0`.
+- Firewall rules are added only after a connection is refused. The macOS Application Firewall needed none for this daemon.
 
 ### Call logging
 
@@ -207,7 +216,43 @@ $ ./sys1-mcp/scripts/restart-warm.sh --reload
 
 ## Resource cost
 
-On this host the MCP daemon's `phys_footprint` is 83 MB, and the Jev-Style model server's is 5,074 MB (read with `footprint` on 2026-10-02, both warm). The daemon holds no model on the `systemone` backend.
+`phys_footprint` on this host, read with `footprint`:
+
+- MCP daemon: 83 MB warm (2026-10-02). It holds no model on the `systemone` backend.
+- Jev-Style model server, MLX cache capped at 0: 3,160 MB warm after restart. Replaying 368 real gate calls held it at 4.2-6.5 GB, peaking at 8.1 GB on 6,000-20,000-token inputs, and it fell back to 3.0-3.3 GB once idle (2026-10-14). Uncapped it sat at 5,074 MB warm (2026-10-02). The cap changed no answer in that replay.
+- Laya on `laya-mlx`: the first start took 409 s, mostly downloading the checkpoint. With the MLX cache capped at 512 MiB (`MLX_CACHE_LIMIT_BYTES` in `laya_mlx.py`) the process held 2,341 MB after warm-up, against 11 GB uncapped after one 256-item classify (2026-09-23). A warm loopback HTTPS `tools/call` took 33-41 ms.
+
+## Choosing the model
+
+Nine System One models were run through this server's own `systemone` backend on 2026-10-02, with the same data, question wording and client for all of them. Accuracy is on 116-160 items per task, so gaps under about 5 points are noise. The typed-decisions column is in-domain for Laya typed-decisions and very likely for Jev-Style.
+
+| model | size | injection AUC | AG News acc | BoolQ acc | SST-5 acc | typed-decisions acc | latency |
+|---|---|---|---|---|---|---|---|
+| Laya English (`aac6fef/laya-mlx`) | 0.42B | 0.829 | 0.950 | 0.850 | 0.281 | 0.337 | 54 ms |
+| Laya typed-decisions (`aac6fef/laya-typed-decisions-mlx`) | 0.42B | 0.926 | 0.944 | 0.831 | 0.438 | 0.783 | 54 ms |
+| **Jev-Style-0.8B-v3** (`chaoliangUNSW/Jev-Style-0.8B-Decision-v3-MLX`) | 0.75B | 0.952 | 0.950 | 0.875 | 0.556 | 0.800 | 49 ms |
+| Kev-0.8B (`jaredpalmer/kev-0.8b`) | 0.8B | 0.732 | 0.894 | 0.863 | 0.456 | 0.407 | 46 ms |
+| OpenThai-SystemOne (`iapp/OpenThai-SystemOne`) | 0.75B | 0.959 | 0.956 | 0.825 | 0.431 | 0.483 | 135 ms |
+| open-jev-deberta-v3-large | 0.43B | 0.544 | 0.787 | 0.894 | 0.613 | 0.387 | 56 ms |
+| Jev-Style-2B-v3 | 2B | 0.945 | 0.856 | 0.906 | 0.406 | 0.610 | 94 ms |
+| decider-2b v11 (`Mapika/decider-2b`) | 1.9B | 0.942 | 0.881 | 0.875 | 0.531 | 0.643 | 117 ms |
+| Kev-4B (`jaredpalmer/kev-4b`) | 4.2B | 0.922 | 0.919 | 0.919 | 0.544 | 0.663 | 217 ms |
+
+Jev-Style-0.8B-v3 matched or beat Laya on every task at about the same latency, and it reads up to 25,600 tokens where Laya cuts at 1,024. On `sys1_screen`'s own schema it scored `directed` AUC 0.949 and `injection` AUC 0.930 on the deepset prompt-injection test set. Switching gave up three Laya-only features: exact per-question truncation reports, batched forward passes across `sys1_classify` items, and tokenizer-exact screening chunks.
+
+OpenDecider-nano (`manjunathshiva/opendecider-nano`) was tried on 2026-10-14 against 368 real gate calls and rejected. Its 2,048-token limit truncated 85% of the questions, and it then chose the permissive option almost every time.
+
+### Relevance wording
+
+177 real `(task, context)` pairs from the call log, labelled blind by an independent judge (170 relevant, 6 not), on Jev-Style:
+
+| `sys1_relevant` wording | relevant at ≥ 0.5 | negatives below 0.5 |
+|---|---|---|
+| earlier wording | 87 of 170 | 5 of 6 |
+| `noul` with true/false descriptions | 110 of 170 | 5 of 6 |
+| neutral two-option `choice` (current default) | 152 of 170 | 5 of 6 |
+
+On Laya the logged plain `noul` kept 137 of 170 and all 6 negatives, and the neutral-choice rewrite was reverted there on 2026-09-27, so `laya-mlx` keeps the `noul`.
 
 ## Registering with an MCP client
 
@@ -219,7 +264,7 @@ The endpoint is `https://<name>:8765/mcp`, `streamable-http`, registered as `sys
 $ claude mcp add --scope user --transport http sys1-mcp https://localhost:8765/mcp
 ```
 
-The skill is linked at user scope: `~/.claude/skills/sys1-mcp` → `skills/sys1-mcp`.
+Install the skill at user scope by copying `skills/sys1-mcp` to `~/.claude/skills/sys1-mcp`.
 
 ### Codex CLI
 
@@ -231,7 +276,7 @@ url = "https://localhost:8765/mcp"
 default_tools_approval_mode = "approve"
 ```
 
-Without `default_tools_approval_mode`, Codex asks before every call, and `codex exec` fails the call outright. Approving is safe here because the backend is a loopback endpoint on this host. On a remote backend it also approves sending tool input off the machine. The skill is linked as `~/.codex/skills/sys1-mcp` → `skills/sys1-mcp`.
+Without `default_tools_approval_mode`, Codex asks before every call, and `codex exec` fails the call outright. Approving is safe here because the backend is a loopback endpoint on this host. On a remote backend it also approves sending tool input off the machine. Install the skill by copying `skills/sys1-mcp` to `~/.codex/skills/sys1-mcp`.
 
 ### Claude Desktop
 
@@ -265,5 +310,3 @@ Claude Desktop cannot reach this server by URL: its custom connectors connect fr
 - `sys1-mcp/deploy/`: the LaunchAgent plists and the identity lock.
 - `sys1-mcp/scripts/`: `restart-warm.sh`, `check-identity.py`.
 - `tools/scripts/`: `check-mcp.sh`, `mint-cert.sh`.
-- `.agent/docs/`: model choice, usage findings, network decisions.
-- `research.md`: the research brief this setup started from.
